@@ -474,7 +474,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/login", post(login_check))
         .route("/forum/bootstrap", get(bootstrap))
         .route("/forum/posts", post(post_post))
-        .route("/forum/posts/{id}", get(get_post))
+        .route("/forum/posts/{id}", get(get_post).get(delete_post))
         .with_state(pool);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:7878").await?;
     axum::serve(listener, app).await?;
