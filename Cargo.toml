@@ -9,7 +9,10 @@ tokio = {version = "1.50.0",features = ["full"]}
 sqlx = {version = "0.8.6",features = ["runtime-tokio","postgres","chrono"]}
 serde = {version = "1.0.228"}
 rand = {version = "0.10.0"}
-chrono = {version = "0.4.44",features = ["serde"]}
+chrono = {version = "0.4.44", features = ["serde"]}
 jsonwebtoken ={version = "10.3.0",features = ["rust_crypto"]}
 lettre = "0.11"
 dotenv = {version = "0.15.0"}
+base64 = "0.22.1"
+hmac = "0.12.1"
+sha2 = "0.10.9"

@@ -1,71 +1,115 @@
-use sqlx::{Pool, Postgres};
+use sqlx::{Pool, Postgres, postgres::PgPoolOptions};
+use std::env;
+use std::time::Duration;
+use tokio::time::timeout;
+
 pub async fn db_init() -> Result<Pool<Postgres>, sqlx::Error> {
-    let pool = Pool::<Postgres>::connect("postgres://postgres:@localhost:5432/postgres").await?;
-    println!("Hello, world!");
-    match sqlx::query("CREATE DATABASE users").execute(&pool).await {
-        Ok(_) => println!("数据库users创建成功."),
-        Err(_) => println!("数据库users已存在."),
-    }
-    let pool = Pool::<Postgres>::connect("postgres://postgres:@localhost:5432/users").await?;
-    match sqlx::query("CREATE TABLE users (id SERIAL PRIMARY KEY, name TEXT NOT NULL, email TEXT NOT NULL UNIQUE)")
-        .execute(&pool)
-        .await
-    {
-        Ok(_) => println!("表users创建成功."),
-        Err(_) => println!("表users已存在."),
+    let database_url = env::var("DATABASE_URL")
+        .unwrap_or_else(|_| "postgres://postgres:@localhost:5432/users".to_string());
+    let pool = timeout(
+        Duration::from_secs(5),
+        PgPoolOptions::new()
+            .max_connections(5)
+            .acquire_timeout(Duration::from_secs(5))
+            .connect(&database_url),
+    )
+    .await
+    .map_err(|_| sqlx::Error::PoolTimedOut)??;
 
-    }
-    match sqlx::query("ALTER TABLE users ADD COLUMN password VARCHAR(255) NOT NULL")
-        .execute(&pool)
-        .await
-    {
-        Ok(_) => println!("密码列添加成功."),
-        Err(_) => println!("密码列已存在."),
-    }
-    match sqlx::query("CREATE TABLE verify_code (email TEXT NOT NULL, code VARCHAR(6) NOT NULL)")
-        .execute(&pool)
-        .await
-    {
-        Ok(_) => println!("表verify_code创建成功."),
-        Err(_) => println!("表verify_code已存在."),
-    }
-    match sqlx::query("ALTER TABLE users ADD COLUMN avatar VARCHAR(255) NOT NULL DEFAULT ''")
-        .execute(&pool)
-        .await
-    {
-        Ok(_) => println!("avatar列添加成功."),
-        Err(_) => println!("avatar列已存在."),
-    }
-
-    match sqlx::query("ALTER TABLE users ADD COLUMN is_admin BOOLEAN NOT NULL DEFAULT FALSE")
-        .execute(&pool)
-        .await
-    {
-        Ok(_) => println!("is_admin列添加成功."),
-        Err(_) => println!("is_admin列已存在."),
-    }
-    match sqlx::query(
-        "CREATE TABLE posts (
-        id SERIAL PRIMARY KEY,
-        title TEXT NOT NULL,
-        content TEXT NOT NULL,
-        author_id INT NOT NULL REFERENCES users(id),
-        category TEXT NOT NULL,
-        tags TEXT[] NOT NULL DEFAULT '{}',
-        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        view_count INT NOT NULL DEFAULT 0,
-        comment_count INT NOT NULL DEFAULT 0,
-        like_count INT NOT NULL DEFAULT 0,
-        is_pinned BOOLEAN NOT NULL DEFAULT FALSE,
-        is_locked BOOLEAN NOT NULL DEFAULT FALSE
-    )",
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS users (
+            id SERIAL PRIMARY KEY,
+            name TEXT NOT NULL,
+            email TEXT NOT NULL UNIQUE,
+            password VARCHAR(255) NOT NULL DEFAULT ''
+        )",
     )
     .execute(&pool)
-    .await
-    {
-        Ok(_) => println!("posts表格添加成功."),
-        Err(_) => println!("posts表格已存在."),
-    }
+    .await?;
+
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS verify_code (
+            email TEXT NOT NULL,
+            code VARCHAR(6) NOT NULL,
+            expires_at TIMESTAMPTZ NOT NULL DEFAULT NOW() + INTERVAL '5 minutes'
+        )",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE verify_code
+         ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ NOT NULL DEFAULT NOW() + INTERVAL '5 minutes'",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "DELETE FROM verify_code a
+         USING verify_code b
+         WHERE LOWER(a.email) = LOWER(b.email)
+           AND a.ctid < b.ctid",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "CREATE UNIQUE INDEX IF NOT EXISTS verify_code_email_lower_idx
+         ON verify_code (LOWER(email))",
+    )
+    .execute(&pool)
+    .await?;
+
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS forum_posts (
+            id SERIAL PRIMARY KEY,
+            title TEXT NOT NULL,
+            content TEXT NOT NULL,
+            author_id INT NOT NULL REFERENCES users(id),
+            category VARCHAR(32) NOT NULL DEFAULT 'general',
+            tags TEXT[] NOT NULL DEFAULT '{}',
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            view_count INT NOT NULL DEFAULT 0,
+            is_pinned BOOLEAN NOT NULL DEFAULT false,
+            is_locked BOOLEAN NOT NULL DEFAULT false
+        )",
+    )
+    .execute(&pool)
+    .await?;
+
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS forum_comments (
+            id SERIAL PRIMARY KEY,
+            post_id INT NOT NULL REFERENCES forum_posts(id) ON DELETE CASCADE,
+            author_id INT NOT NULL REFERENCES users(id),
+            content TEXT NOT NULL,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )",
+    )
+    .execute(&pool)
+    .await?;
+
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS forum_messages (
+            id SERIAL PRIMARY KEY,
+            sender_id INT NOT NULL REFERENCES users(id),
+            recipient_id INT NOT NULL REFERENCES users(id),
+            content TEXT NOT NULL,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            is_read BOOLEAN NOT NULL DEFAULT false
+        )",
+    )
+    .execute(&pool)
+    .await?;
+
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS forum_post_likes (
+            post_id INT NOT NULL REFERENCES forum_posts(id) ON DELETE CASCADE,
+            user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            PRIMARY KEY (post_id, user_id)
+        )",
+    )
+    .execute(&pool)
+    .await?;
+
     Ok(pool)
 }

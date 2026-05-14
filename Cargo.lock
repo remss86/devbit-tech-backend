@@ -344,12 +344,15 @@ name = "devbit"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "base64",
  "chrono",
  "dotenv",
+ "hmac",
  "jsonwebtoken",
  "lettre",
  "rand 0.10.0",
  "serde",
+ "sha2",
  "sqlx",
  "tokio",
 ]
