@@ -5,7 +5,6 @@ pub async fn db_init() -> Result<Pool<Postgres>, sqlx::Error> {
     match sqlx::query("CREATE DATABASE users").execute(&pool).await {
         Ok(_) => println!("数据库users创建成功."),
         Err(_) => println!("数据库users已存在."),
-
     }
     let pool = Pool::<Postgres>::connect("postgres://postgres:@localhost:5432/users").await?;
     match sqlx::query(
@@ -14,17 +13,19 @@ pub async fn db_init() -> Result<Pool<Postgres>, sqlx::Error> {
             name TEXT NOT NULL,
             email TEXT NOT NULL UNIQUE,
             password VARCHAR(255) NOT NULL DEFAULT ''
-        )"
+        )",
     )
-        .execute(&pool)
-        .await
+    .execute(&pool)
+    .await
     {
         Ok(_) => println!("表users创建成功."),
         Err(e) => println!("表users: {}", e),
     }
-    match sqlx::query("CREATE TABLE IF NOT EXISTS verify_code (email TEXT NOT NULL, code VARCHAR(6) NOT NULL)")
-        .execute(&pool)
-        .await
+    match sqlx::query(
+        "CREATE TABLE IF NOT EXISTS verify_code (email TEXT NOT NULL, code VARCHAR(6) NOT NULL)",
+    )
+    .execute(&pool)
+    .await
     {
         Ok(_) => println!("表verify_code创建成功."),
         Err(e) => println!("表verify_code: {}", e),
@@ -44,8 +45,10 @@ pub async fn db_init() -> Result<Pool<Postgres>, sqlx::Error> {
             view_count INT NOT NULL DEFAULT 0,
             is_pinned BOOLEAN NOT NULL DEFAULT false,
             is_locked BOOLEAN NOT NULL DEFAULT false
-        )"
-    ).execute(&pool).await
+        )",
+    )
+    .execute(&pool)
+    .await
     {
         Ok(_) => println!("表forum_posts创建成功."),
         Err(e) => println!("表forum_posts: {}", e),
@@ -58,8 +61,10 @@ pub async fn db_init() -> Result<Pool<Postgres>, sqlx::Error> {
             author_id INT NOT NULL REFERENCES users(id),
             content TEXT NOT NULL,
             created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-        )"
-    ).execute(&pool).await
+        )",
+    )
+    .execute(&pool)
+    .await
     {
         Ok(_) => println!("表forum_comments创建成功."),
         Err(e) => println!("表forum_comments: {}", e),
@@ -73,11 +78,28 @@ pub async fn db_init() -> Result<Pool<Postgres>, sqlx::Error> {
             content TEXT NOT NULL,
             created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             is_read BOOLEAN NOT NULL DEFAULT false
-        )"
-    ).execute(&pool).await
+        )",
+    )
+    .execute(&pool)
+    .await
     {
         Ok(_) => println!("表forum_messages创建成功."),
         Err(e) => println!("表forum_messages: {}", e),
+    }
+
+    match sqlx::query(
+        "CREATE TABLE IF NOT EXISTS forum_post_likes (
+            post_id INT NOT NULL REFERENCES forum_posts(id) ON DELETE CASCADE,
+            user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            PRIMARY KEY (post_id, user_id)
+        )",
+    )
+    .execute(&pool)
+    .await
+    {
+        Ok(_) => println!("表forum_post_likes创建成功."),
+        Err(e) => println!("表forum_post_likes: {}", e),
     }
 
     Ok(pool)
