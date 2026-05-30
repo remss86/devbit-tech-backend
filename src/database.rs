@@ -111,5 +111,16 @@ pub async fn db_init() -> Result<Pool<Postgres>, sqlx::Error> {
     .execute(&pool)
     .await?;
 
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS friends (
+            user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            friend_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            PRIMARY KEY (user_id, friend_id)
+        )",
+    )
+    .execute(&pool)
+    .await?;
+
     Ok(pool)
 }
