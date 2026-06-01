@@ -109,6 +109,34 @@ pub struct SearchQuery {
     pub q: Option<String>,
 }
 
+struct LikeSearch {
+    query: String,
+    contains_pattern: String,
+    prefix_pattern: String,
+}
+
+impl LikeSearch {
+    fn new(query: String) -> Self {
+        let escaped_query = escape_like_pattern(&query);
+        Self {
+            query,
+            contains_pattern: format!("%{}%", escaped_query),
+            prefix_pattern: format!("{}%", escaped_query),
+        }
+    }
+}
+
+fn escape_like_pattern(query: &str) -> String {
+    let mut escaped = String::with_capacity(query.len());
+    for ch in query.chars() {
+        if matches!(ch, '%' | '_' | '\\') {
+            escaped.push('\\');
+        }
+        escaped.push(ch);
+    }
+    escaped
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AddFriendRequest {
@@ -838,7 +866,7 @@ async fn search_posts(
         _ => return Ok(Json(vec![])),
     };
 
-    let pattern = format!("%{}%", query);
+    let search = LikeSearch::new(query);
     let rows = sqlx::query(
         "SELECT p.id, p.title, p.content, p.author_id, p.category, p.tags,
                 p.created_at, p.updated_at, p.view_count::BIGINT as view_count,
@@ -849,12 +877,13 @@ async fn search_posts(
          FROM forum_posts p
          JOIN users u ON u.id = p.author_id
          LEFT JOIN forum_post_likes l ON l.post_id = p.id
-         WHERE LOWER(p.title) LIKE $2 OR LOWER(p.content) LIKE $2
+         WHERE LOWER(p.title) LIKE $2 ESCAPE '\\'
+            OR LOWER(p.content) LIKE $2 ESCAPE '\\'
          GROUP BY p.id, u.name
          ORDER BY p.is_pinned DESC, p.created_at DESC",
     )
     .bind(optional_user_id(&headers))
-    .bind(&pattern)
+    .bind(&search.contains_pattern)
     .fetch_all(&pool)
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -961,21 +990,20 @@ async fn search_users(
         _ => return Ok(Json(vec![])),
     };
 
-    let contains_pattern = format!("%{}%", query);
-    let prefix_pattern = format!("{}%", query);
+    let search = LikeSearch::new(query);
     let rows = sqlx::query(
         "SELECT id, name FROM users
-         WHERE LOWER(name) LIKE $1
+         WHERE LOWER(name) LIKE $1 ESCAPE '\\'
          ORDER BY
-            CASE WHEN LOWER(name) LIKE $2 THEN 0 ELSE 1 END,
+            CASE WHEN LOWER(name) LIKE $2 ESCAPE '\\' THEN 0 ELSE 1 END,
             POSITION($3 IN LOWER(name)),
             LOWER(name) ASC,
             id ASC
          LIMIT 20",
     )
-    .bind(&contains_pattern)
-    .bind(&prefix_pattern)
-    .bind(&query)
+    .bind(&search.contains_pattern)
+    .bind(&search.prefix_pattern)
+    .bind(&search.query)
     .fetch_all(&pool)
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
