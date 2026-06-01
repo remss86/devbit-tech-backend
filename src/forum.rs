@@ -961,14 +961,21 @@ async fn search_users(
         _ => return Ok(Json(vec![])),
     };
 
-    let pattern = format!("%{}%", query);
+    let contains_pattern = format!("%{}%", query);
+    let prefix_pattern = format!("{}%", query);
     let rows = sqlx::query(
         "SELECT id, name FROM users
          WHERE LOWER(name) LIKE $1
-         ORDER BY name ASC
+         ORDER BY
+            CASE WHEN LOWER(name) LIKE $2 THEN 0 ELSE 1 END,
+            POSITION($3 IN LOWER(name)),
+            LOWER(name) ASC,
+            id ASC
          LIMIT 20",
     )
-    .bind(&pattern)
+    .bind(&contains_pattern)
+    .bind(&prefix_pattern)
+    .bind(&query)
     .fetch_all(&pool)
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
