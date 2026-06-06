@@ -3,6 +3,7 @@ use axum::{
     extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
     routing::{delete, get, put},
+    Extension,
 };
 use chrono::{DateTime, Utc};
 use jsonwebtoken::{DecodingKey, Validation, decode};
@@ -835,6 +836,7 @@ async fn list_messages(
 
 async fn send_message(
     State(pool): State<Pool<Postgres>>,
+    Extension(ws_state): Extension<crate::ws::WsState>,
     headers: HeaderMap,
     Json(payload): Json<SendMessageRequest>,
 ) -> Result<Json<ForumMessage>, StatusCode> {
@@ -855,14 +857,31 @@ async fn send_message(
 
     let created_at: DateTime<Utc> = row.get("created_at");
 
-    Ok(Json(ForumMessage {
+    let message = ForumMessage {
         id: row.get("id"),
-        sender,
-        recipient,
-        content: payload.content,
+        sender: sender.clone(),
+        recipient: recipient.clone(),
+        content: payload.content.clone(),
         created_at: created_at.to_rfc3339(),
         is_read: false,
-    }))
+    };
+
+    // Push WebSocket notification to recipient
+    let content_preview = if payload.content.len() > 60 {
+        format!("{}...", &payload.content[..57])
+    } else {
+        payload.content.clone()
+    };
+    let ws_msg = serde_json::json!({
+        "type": "new_message",
+        "message_id": message.id,
+        "sender_id": sender.id,
+        "sender_name": sender.name,
+        "content_preview": content_preview,
+    });
+    ws_state.send_to_user(payload.recipient_id, &ws_msg.to_string());
+
+    Ok(Json(message))
 }
 
 async fn mark_message_read(

@@ -18,3 +18,9 @@ hmac = "0.12.1"
 sha2 = "0.10.9"
 uuid = {version = "1.18.1", features = ["v4"]}
 mime_guess = "2.0.5"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "time"] }
+tracing-appender = "0.2"
+axum-extra = { version = "0.10", features = ["typed-header"] }
+dashmap = "6.1"
+futures-util = "0.3"

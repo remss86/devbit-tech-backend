@@ -2,7 +2,11 @@ use sqlx::{Pool, Postgres, postgres::PgPoolOptions};
 use std::env;
 use std::time::Duration;
 use tokio::time::timeout;
+use tracing::info;
 
+/// Initialize the database connection pool and run migrations.
+/// Sets server-side statement_timeout to 10s for safety.
+#[tracing::instrument(skip_all)]
 pub async fn db_init() -> Result<Pool<Postgres>, sqlx::Error> {
     let database_url = env::var("DATABASE_URL")
         .unwrap_or_else(|_| "postgres://postgres:@localhost:5432/users".to_string());
@@ -15,6 +19,13 @@ pub async fn db_init() -> Result<Pool<Postgres>, sqlx::Error> {
     )
     .await
     .map_err(|_| sqlx::Error::PoolTimedOut)??;
+
+    // Set a reasonable statement timeout to catch slow queries early
+    sqlx::query("SET statement_timeout = '10000'")
+        .execute(&pool)
+        .await?;
+
+    info!("Database connected, pool ready");
 
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS users (

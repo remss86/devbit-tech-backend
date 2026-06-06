@@ -5,6 +5,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use axum::extract::{ConnectInfo, Multipart, Path as AxumPath};
 use axum::middleware;
+use axum::Extension;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{Duration, Utc};
 use dotenv::dotenv;
@@ -24,10 +25,12 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
+use tracing::{info, warn, error, info_span, Instrument};
 use uuid::Uuid;
 
 mod database;
 use devbit::forum;
+use devbit::ws;
 
 type HmacSha256 = Hmac<Sha256>;
 const AUTH_COOKIE_NAME: &str = "auth_token";
@@ -185,7 +188,7 @@ async fn login_check(
     let token =
         generate_token(user_id, &user_email).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let cookie =
-        format!("{AUTH_COOKIE_NAME}={token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=86400");
+        format!("{AUTH_COOKIE_NAME}={token}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=86400");
 
     Ok((
         [(header::SET_COOKIE, cookie)],
@@ -444,7 +447,7 @@ async fn serve_avatar(
 
 async fn logout() -> Response {
     let cookie = format!(
-        "{AUTH_COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT"
+        "{AUTH_COOKIE_NAME}=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT"
     );
 
     (
@@ -533,13 +536,158 @@ async fn strict_rate_limit_middleware(
     next.run(request).await
 }
 
+// ── Health check ────────────────────────────────────────────────────────────
+
+#[derive(Serialize)]
+struct HealthResponse {
+    status: &'static str,
+    db: &'static str,
+    uptime_secs: u64,
+}
+
+async fn health_check(
+    State(pool): State<Pool<Postgres>>,
+    State(start_time): State<Arc<Instant>>,
+) -> Result<Json<HealthResponse>, StatusCode> {
+    let db_ok = sqlx::query("SELECT 1")
+        .fetch_one(&pool)
+        .await
+        .is_ok();
+
+    Ok(Json(HealthResponse {
+        status: if db_ok { "ok" } else { "degraded" },
+        db: if db_ok { "ok" } else { "unreachable" },
+        uptime_secs: start_time.elapsed().as_secs(),
+    }))
+}
+
+// ── Logging middleware ──────────────────────────────────────────────────────
+
+async fn logging_middleware(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let start = Instant::now();
+    let method = request.method().clone();
+    let uri = request.uri().clone();
+    let request_id = Uuid::new_v4().to_string();
+
+    let span = info_span!(
+        "request",
+        %request_id,
+        method = %method,
+        uri = %uri,
+    );
+
+    async move {
+        let response = next.run(request).await;
+        let latency_ms = start.elapsed().as_millis() as u64;
+        let status = response.status().as_u16();
+
+        if status >= 500 {
+            error!(
+                %request_id,
+                method = %method,
+                uri = %uri,
+                status,
+                latency_ms,
+                "Request failed with server error"
+            );
+        } else if status >= 400 {
+            warn!(
+                %request_id,
+                method = %method,
+                uri = %uri,
+                status,
+                latency_ms,
+                "Request failed with client error"
+            );
+        } else {
+            info!(
+                %request_id,
+                method = %method,
+                uri = %uri,
+                status,
+                latency_ms,
+                "Request completed"
+            );
+        }
+
+        response
+    }
+    .instrument(span)
+    .await
+}
+
+// ── Security headers middleware ─────────────────────────────────────────────
+
+async fn security_headers_middleware(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let mut response = next.run(request).await;
+    let headers = response.headers_mut();
+    headers.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        "nosniff".parse().unwrap(),
+    );
+    headers.insert(
+        header::X_FRAME_OPTIONS,
+        "DENY".parse().unwrap(),
+    );
+    headers.insert(
+        header::STRICT_TRANSPORT_SECURITY,
+        "max-age=63072000; includeSubDomains; preload"
+            .parse()
+            .unwrap(),
+    );
+    response
+}
+
+// ── Main ────────────────────────────────────────────────────────────────────
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     dotenv().ok();
+
+    // ── Tracing subscriber ────────────────────────────────────────────────
+    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+
+    if env::var("NODE_ENV")
+        .map(|v| v.trim() == "production")
+        .unwrap_or(false)
+    {
+        // Production: JSON logs to stdout + rolling file
+        let file_appender = tracing_appender::rolling::daily("logs", "devbit.log");
+        let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
+        tracing_subscriber::fmt()
+            .with_env_filter(env_filter)
+            .json()
+            .with_writer(non_blocking)
+            .with_target(false)
+            .init();
+        // Leak the guard so the file writer lives forever
+        std::mem::forget(_guard);
+    } else {
+        // Development: human-readable to stdout
+        tracing_subscriber::fmt()
+            .with_env_filter(env_filter)
+            .with_target(false)
+            .init();
+    }
+
+    info!("Starting DevBit backend...");
+
     let pool = database::db_init().await?;
+    info!("Database connection pool initialized");
 
     // ── Rate limiter state ──────────────────────────────────────────────────
     let rate_limiter: RateLimiter = Arc::new(Mutex::new(HashMap::new()));
+    let start_time = Arc::new(Instant::now());
+
+    // ── WebSocket state ─────────────────────────────────────────────────────
+    let ws_state = ws::WsState::new(pool.clone());
 
     // Auth-sensitive routes — strict rate limit (5 req / 60s)
     let auth_routes = Router::new()
@@ -570,9 +718,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             rate_limiter,
             rate_limit_middleware,
         ))
+        .layer(Extension(ws_state.clone()))
         .with_state(pool.clone());
 
-    let app = auth_routes.merge(general_routes);
+    // Health + WebSocket routes — no rate limiting
+    let infra_routes = Router::new()
+        .route("/health", get(health_check))
+        .route("/api/health", get(health_check))
+        .route("/ws", get(ws::ws_handler))
+        .route("/api/ws", get(ws::ws_handler))
+        .with_state(ws_state)
+        .with_state(pool.clone())
+        .with_state(start_time);
+
+    let app = auth_routes
+        .merge(general_routes)
+        .merge(infra_routes)
+        .layer(middleware::from_fn(logging_middleware))
+        .layer(middleware::from_fn(security_headers_middleware));
+
+    info!("Listening on 127.0.0.1:7878");
     let listener = tokio::net::TcpListener::bind("127.0.0.1:7878").await?;
     axum::serve(listener, app).await?;
     Ok(())
