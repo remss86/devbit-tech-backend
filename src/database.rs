@@ -21,8 +21,16 @@ pub async fn db_init() -> Result<Pool<Postgres>, sqlx::Error> {
             id SERIAL PRIMARY KEY,
             name TEXT NOT NULL,
             email TEXT NOT NULL UNIQUE,
-            password VARCHAR(255) NOT NULL DEFAULT ''
+            password VARCHAR(255) NOT NULL DEFAULT '',
+            avatar_url TEXT
         )",
+    )
+    .execute(&pool)
+    .await?;
+
+    sqlx::query(
+        "ALTER TABLE users
+         ADD COLUMN IF NOT EXISTS avatar_url TEXT",
     )
     .execute(&pool)
     .await?;
