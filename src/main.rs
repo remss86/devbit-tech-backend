@@ -3,6 +3,8 @@ use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use axum::extract::{ConnectInfo, Multipart, Path as AxumPath};
+use axum::middleware;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{Duration, Utc};
 use dotenv::dotenv;
@@ -15,7 +17,14 @@ use rand;
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use sqlx::{Pool, Postgres, Row};
+use std::collections::HashMap;
 use std::env;
+use std::net::IpAddr;
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
+use tokio::fs;
+use tokio::io::AsyncWriteExt;
+use uuid::Uuid;
 
 mod database;
 use devbit::forum;
@@ -26,6 +35,9 @@ const PASSWORD_HASH_PREFIX: &str = "pbkdf2-sha256";
 const PASSWORD_HASH_ITERATIONS: u32 = 100_000;
 const PASSWORD_HASH_BYTES: usize = 32;
 const VERIFICATION_CODE_EXPIRES_SECONDS: u32 = 600;
+const AVATAR_DIR: &str = "uploads/avatars";
+const MAX_AVATAR_SIZE: usize = 2 * 1024 * 1024; // 2 MB
+const ALLOWED_AVATAR_EXTS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp"];
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -33,6 +45,8 @@ struct User {
     id: i32,
     name: String,
     email: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    avatar_url: Option<String>,
     is_admin: bool,
 }
 
@@ -141,7 +155,7 @@ async fn login_check(
 ) -> Result<Response, StatusCode> {
     let email = payload.email.trim().to_lowercase();
     let row =
-        sqlx::query("SELECT password, id, name, email FROM users WHERE LOWER(email) = LOWER($1)")
+        sqlx::query("SELECT password, id, name, email, avatar_url FROM users WHERE LOWER(email) = LOWER($1)")
             .bind(&email)
             .fetch_optional(&pool)
             .await
@@ -156,6 +170,7 @@ async fn login_check(
     let user_id: i32 = row.get(1);
     let user_name: String = row.get(2);
     let user_email: String = row.get(3);
+    let user_avatar_url: Option<String> = row.get(4);
 
     if !stored_password.starts_with(PASSWORD_HASH_PREFIX) {
         let upgraded_hash = hash_password(&payload.password);
@@ -180,6 +195,7 @@ async fn login_check(
                 id: user_id,
                 name: user_name,
                 email: user_email,
+                avatar_url: user_avatar_url,
                 is_admin: is_admin_user(user_id),
             },
         }),
@@ -276,7 +292,7 @@ async fn current_user(
     headers: HeaderMap,
 ) -> Result<Json<User>, StatusCode> {
     let user_id = user_id_from_headers(&headers).ok_or(StatusCode::UNAUTHORIZED)?;
-    let row = sqlx::query("SELECT id, name, email FROM users WHERE id = $1")
+    let row = sqlx::query("SELECT id, name, email, avatar_url FROM users WHERE id = $1")
         .bind(user_id)
         .fetch_optional(&pool)
         .await
@@ -288,8 +304,142 @@ async fn current_user(
         id: user_id,
         name: row.get("name"),
         email: row.get("email"),
+        avatar_url: row.get("avatar_url"),
         is_admin: is_admin_user(user_id),
     }))
+}
+
+async fn upload_avatar(
+    State(pool): State<Pool<Postgres>>,
+    headers: HeaderMap,
+    mut multipart: Multipart,
+) -> Result<Json<User>, StatusCode> {
+    let user_id = user_id_from_headers(&headers).ok_or(StatusCode::UNAUTHORIZED)?;
+
+    // Ensure avatar directory exists
+    fs::create_dir_all(AVATAR_DIR)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let mut field_found = false;
+    while let Ok(Some(mut field)) = multipart.next_field().await {
+        let name = field.name().unwrap_or("").to_string();
+        if name != "avatar" {
+            continue;
+        }
+
+        let file_name = field.file_name().unwrap_or("").to_string();
+        if file_name.is_empty() {
+            return Err(StatusCode::BAD_REQUEST);
+        }
+
+        // Validate file extension
+        let ext = file_name
+            .rsplit('.')
+            .next()
+            .unwrap_or("")
+            .to_lowercase();
+        if !ALLOWED_AVATAR_EXTS.contains(&ext.as_str()) {
+            return Err(StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        }
+
+        // Generate unique filename
+        let filename = format!("{}.{}", Uuid::new_v4(), ext);
+        let filepath = format!("{}/{}", AVATAR_DIR, filename);
+
+        // Read file bytes
+        let mut data = Vec::new();
+        while let Ok(Some(chunk)) = field.chunk().await {
+            data.extend_from_slice(&chunk);
+            if data.len() > MAX_AVATAR_SIZE {
+                return Err(StatusCode::PAYLOAD_TOO_LARGE);
+            }
+        }
+
+        if data.is_empty() {
+            return Err(StatusCode::BAD_REQUEST);
+        }
+
+        // Delete old avatar file if exists
+        let old_avatar: Option<String> = sqlx::query_scalar(
+            "SELECT avatar_url FROM users WHERE id = $1",
+        )
+        .bind(user_id)
+        .fetch_optional(&pool)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .flatten();
+
+        if let Some(old_url) = old_avatar {
+            if let Some(old_filename) = old_url.strip_prefix("/api/avatars/") {
+                let old_path = format!("{}/{}", AVATAR_DIR, old_filename);
+                let _ = fs::remove_file(&old_path).await;
+            }
+        }
+
+        // Write new file
+        let mut file = fs::File::create(&filepath)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        file.write_all(&data)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        // Update database
+        let avatar_url = format!("/api/avatars/{}", filename);
+        sqlx::query("UPDATE users SET avatar_url = $1 WHERE id = $2")
+            .bind(&avatar_url)
+            .bind(user_id)
+            .execute(&pool)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        field_found = true;
+        break;
+    }
+
+    if !field_found {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    // Return updated user
+    let row = sqlx::query("SELECT id, name, email, avatar_url FROM users WHERE id = $1")
+        .bind(user_id)
+        .fetch_one(&pool)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(Json(User {
+        id: row.get("id"),
+        name: row.get("name"),
+        email: row.get("email"),
+        avatar_url: row.get("avatar_url"),
+        is_admin: is_admin_user(user_id),
+    }))
+}
+
+async fn serve_avatar(
+    AxumPath(filename): AxumPath<String>,
+) -> Result<Response, StatusCode> {
+    // Prevent directory traversal
+    if filename.contains('/') || filename.contains('\\') || filename.contains("..") {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    let filepath = format!("{}/{}", AVATAR_DIR, filename);
+
+    let data = fs::read(&filepath)
+        .await
+        .map_err(|_| StatusCode::NOT_FOUND)?;
+
+    let mime = mime_guess::from_path(&filename)
+        .first_or_octet_stream();
+
+    Ok((
+        [(header::CONTENT_TYPE, mime.as_ref())],
+        data,
+    )
+        .into_response())
 }
 
 async fn logout() -> Response {
@@ -304,23 +454,125 @@ async fn logout() -> Response {
         .into_response()
 }
 
+// ── Rate Limiter ────────────────────────────────────────────────────────────
+
+type RateLimiter = Arc<Mutex<HashMap<IpAddr, Vec<Instant>>>>;
+
+#[derive(Serialize)]
+struct RateLimitError {
+    error: String,
+}
+
+/// Simple sliding-window rate limiting middleware (10 req / 60s per IP).
+async fn rate_limit_middleware(
+    State(limiter): State<RateLimiter>,
+    ConnectInfo(addr): ConnectInfo<IpAddr>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    const MAX_REQUESTS: usize = 10;
+    const WINDOW_SECS: u64 = 60;
+
+    let now = Instant::now();
+    let window = std::time::Duration::from_secs(WINDOW_SECS);
+
+    {
+        let mut map = limiter.lock().unwrap();
+        let entries = map.entry(addr).or_default();
+        entries.retain(|t| now.duration_since(*t) < window);
+
+        if entries.len() >= MAX_REQUESTS {
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                [(header::RETRY_AFTER, "60")],
+                Json(RateLimitError {
+                    error: "Too many requests. Try again later.".into(),
+                }),
+            )
+                .into_response();
+        }
+
+        entries.push(now);
+    }
+
+    next.run(request).await
+}
+
+/// Stricter rate limiter for auth-sensitive endpoints (5 req / 60s per IP).
+async fn strict_rate_limit_middleware(
+    State(limiter): State<RateLimiter>,
+    ConnectInfo(addr): ConnectInfo<IpAddr>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    const MAX_REQUESTS: usize = 5;
+    const WINDOW_SECS: u64 = 60;
+
+    let now = Instant::now();
+    let window = std::time::Duration::from_secs(WINDOW_SECS);
+
+    {
+        let mut map = limiter.lock().unwrap();
+        let entries = map.entry(addr).or_default();
+        entries.retain(|t| now.duration_since(*t) < window);
+
+        if entries.len() >= MAX_REQUESTS {
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                [(header::RETRY_AFTER, "60")],
+                Json(RateLimitError {
+                    error: "Too many requests. Try again later.".into(),
+                }),
+            )
+                .into_response();
+        }
+
+        entries.push(now);
+    }
+
+    next.run(request).await
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     dotenv().ok();
     let pool = database::db_init().await?;
-    let app = Router::new()
-        .route("/register", post(create_user))
+
+    // ── Rate limiter state ──────────────────────────────────────────────────
+    let rate_limiter: RateLimiter = Arc::new(Mutex::new(HashMap::new()));
+
+    // Auth-sensitive routes — strict rate limit (5 req / 60s)
+    let auth_routes = Router::new()
         .route("/register/send_code", post(send_verification_code))
+        .route("/register", post(create_user))
         .route("/login", post(login_check))
-        .route("/me", get(current_user))
-        .route("/logout", post(logout))
-        .route("/api/register", post(create_user))
         .route("/api/register/send_code", post(send_verification_code))
+        .route("/api/register", post(create_user))
         .route("/api/login", post(login_check))
+        .route_layer(middleware::from_fn_with_state(
+            rate_limiter.clone(),
+            strict_rate_limit_middleware,
+        ))
+        .with_state(pool.clone());
+
+    // General routes — standard rate limit (10 req / 60s)
+    let general_routes = Router::new()
+        .route("/me", get(current_user))
+        .route("/me/avatar", post(upload_avatar))
+        .route("/logout", post(logout))
+        .route("/avatars/{filename}", get(serve_avatar))
         .route("/api/me", get(current_user))
+        .route("/api/me/avatar", post(upload_avatar))
+        .route("/api/avatars/{filename}", get(serve_avatar))
         .route("/api/logout", post(logout))
         .merge(forum::forum_routes())
-        .with_state(pool);
+        .route_layer(middleware::from_fn_with_state(
+            rate_limiter,
+            rate_limit_middleware,
+        ))
+        .with_state(pool.clone());
+
+    let app = auth_routes.merge(general_routes);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:7878").await?;
     axum::serve(listener, app).await?;
     Ok(())
