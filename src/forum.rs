@@ -568,7 +568,28 @@ async fn create_post(
     }))
 }
 
-
+async fn my_posts(
+    State(pool):State<Pool<Postgres>>,
+    headers: HeaderMap,
+)->Result<Json<Vec<ForumPost>>, StatusCode>{
+    let user_id = require_user_id(&headers)?;
+    let rows =sqlx::query("SELECT id,
+            title,
+            content,
+            author_id,
+            category,
+            tags,
+            created_at,
+            updated_at,
+            view_count,
+            is_pinned,
+            is_locked FROM forum_posts WHERE author_id = $1;")
+            .bind(user_id)
+            .fetch_all(&pool)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(rows.iter().map(row_to_post).collect()))
+}
 
 async fn modify_post(State(pool):State<Pool<Postgres>>
 ,Path(id):Path<i32>
@@ -1064,5 +1085,6 @@ pub fn forum_routes() -> Router<Pool<Postgres>> {
         .route("/api/forum/friends", get(list_friends).post(add_friend))
         .route("/api/forum/friends/{friend_id}", delete(remove_friend))
         .route("/api/forum/users/search", get(search_users))
+        .route("/api/forum/posts", get(my_posts))
         .route("/api/forum/posts/myposts",put(modify_post))
 }
