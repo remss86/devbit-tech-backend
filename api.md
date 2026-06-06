@@ -263,6 +263,7 @@
 - **函数名**：`modify_post`
 - **URL**：`PUT /api/forum/posts/myposts/modify_post`
 - **需要认证**：是
+- **接收数据**：修改后的 `ForumPost`
 - **功能**：修改自己的帖子
 ---
 
