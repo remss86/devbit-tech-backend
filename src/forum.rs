@@ -568,6 +568,31 @@ async fn create_post(
     }))
 }
 
+
+
+async fn modify_post(State(pool):State<Pool<Postgres>>
+,Path(id):Path<i32>
+,headers: HeaderMap
+,Json(payload): Json<ForumPost>)->Result<StatusCode,StatusCode>{
+    let user = require_current_user(&pool, &headers).await?;
+    require_post_moderator(&pool, id, &user).await?;
+
+    let result = sqlx::query("UPDATE forum_posts 
+SET content = $1,updated_at = NOW() 
+WHERE id = $2;")
+        .bind(payload.content)
+        .bind(id)
+        .execute(&pool)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    if result.rows_affected() == 0 {
+        Err(StatusCode::NOT_FOUND)
+    } else {
+        Ok(StatusCode::OK)
+    }
+}
+
 async fn delete_post(
     State(pool): State<Pool<Postgres>>,
     Path(id): Path<i32>,
@@ -1039,4 +1064,5 @@ pub fn forum_routes() -> Router<Pool<Postgres>> {
         .route("/api/forum/friends", get(list_friends).post(add_friend))
         .route("/api/forum/friends/{friend_id}", delete(remove_friend))
         .route("/api/forum/users/search", get(search_users))
+        .route("/api/forum/posts/myposts",put(modify_post))
 }
