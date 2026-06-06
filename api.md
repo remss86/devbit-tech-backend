@@ -252,6 +252,18 @@
 - **返回数据**：更新后的 `ForumPost`（包含最新的 `likeCount` 和 `likedByMe`）
 - **功能**：当前登录用户对帖子执行点赞或取消点赞操作。
 
+### 4.9 查看自己的所有帖子
+- **函数名**：`my_posts`
+- **URL**：`GET /api/forum/posts/myposts`
+- **需要认证**：是
+- **返回数据**：用户所有的 `ForumPost`
+- **功能**：查看自己的所有帖子
+
+### 4.10 修改自己的帖子
+- **函数名**：`modify_post`
+- **URL**：`GET /api/forum/posts/myposts/modify_post`
+- **需要认证**：是
+- **功能**：修改自己的帖子
 ---
 
 ## 5. 评论相关

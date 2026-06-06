@@ -1085,6 +1085,6 @@ pub fn forum_routes() -> Router<Pool<Postgres>> {
         .route("/api/forum/friends", get(list_friends).post(add_friend))
         .route("/api/forum/friends/{friend_id}", delete(remove_friend))
         .route("/api/forum/users/search", get(search_users))
-        .route("/api/forum/posts", get(my_posts))
-        .route("/api/forum/posts/myposts",put(modify_post))
+        .route("/api/forum/posts/myposts", get(my_posts))
+        .route("/api/forum/posts/myposts/modify_post",put(modify_post))
 }
