@@ -3,6 +3,8 @@ use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use axum::extract::ConnectInfo;
+use axum::middleware;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{Duration, Utc};
 use dotenv::dotenv;
@@ -15,7 +17,11 @@ use rand;
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use sqlx::{Pool, Postgres, Row};
+use std::collections::HashMap;
 use std::env;
+use std::net::IpAddr;
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 mod database;
 use devbit::forum;
@@ -304,23 +310,121 @@ async fn logout() -> Response {
         .into_response()
 }
 
+// ── Rate Limiter ────────────────────────────────────────────────────────────
+
+type RateLimiter = Arc<Mutex<HashMap<IpAddr, Vec<Instant>>>>;
+
+#[derive(Serialize)]
+struct RateLimitError {
+    error: String,
+}
+
+/// Simple sliding-window rate limiting middleware (10 req / 60s per IP).
+async fn rate_limit_middleware(
+    State(limiter): State<RateLimiter>,
+    ConnectInfo(addr): ConnectInfo<IpAddr>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    const MAX_REQUESTS: usize = 10;
+    const WINDOW_SECS: u64 = 60;
+
+    let now = Instant::now();
+    let window = std::time::Duration::from_secs(WINDOW_SECS);
+
+    {
+        let mut map = limiter.lock().unwrap();
+        let entries = map.entry(addr).or_default();
+        entries.retain(|t| now.duration_since(*t) < window);
+
+        if entries.len() >= MAX_REQUESTS {
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                [(header::RETRY_AFTER, "60")],
+                Json(RateLimitError {
+                    error: "Too many requests. Try again later.".into(),
+                }),
+            )
+                .into_response();
+        }
+
+        entries.push(now);
+    }
+
+    next.run(request).await
+}
+
+/// Stricter rate limiter for auth-sensitive endpoints (5 req / 60s per IP).
+async fn strict_rate_limit_middleware(
+    State(limiter): State<RateLimiter>,
+    ConnectInfo(addr): ConnectInfo<IpAddr>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    const MAX_REQUESTS: usize = 5;
+    const WINDOW_SECS: u64 = 60;
+
+    let now = Instant::now();
+    let window = std::time::Duration::from_secs(WINDOW_SECS);
+
+    {
+        let mut map = limiter.lock().unwrap();
+        let entries = map.entry(addr).or_default();
+        entries.retain(|t| now.duration_since(*t) < window);
+
+        if entries.len() >= MAX_REQUESTS {
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                [(header::RETRY_AFTER, "60")],
+                Json(RateLimitError {
+                    error: "Too many requests. Try again later.".into(),
+                }),
+            )
+                .into_response();
+        }
+
+        entries.push(now);
+    }
+
+    next.run(request).await
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     dotenv().ok();
     let pool = database::db_init().await?;
-    let app = Router::new()
-        .route("/register", post(create_user))
+
+    // ── Rate limiter state ──────────────────────────────────────────────────
+    let rate_limiter: RateLimiter = Arc::new(Mutex::new(HashMap::new()));
+
+    // Auth-sensitive routes — strict rate limit (5 req / 60s)
+    let auth_routes = Router::new()
         .route("/register/send_code", post(send_verification_code))
+        .route("/register", post(create_user))
         .route("/login", post(login_check))
+        .route("/api/register/send_code", post(send_verification_code))
+        .route("/api/register", post(create_user))
+        .route("/api/login", post(login_check))
+        .route_layer(middleware::from_fn_with_state(
+            rate_limiter.clone(),
+            strict_rate_limit_middleware,
+        ))
+        .with_state(pool.clone());
+
+    // General routes — standard rate limit (10 req / 60s)
+    let general_routes = Router::new()
         .route("/me", get(current_user))
         .route("/logout", post(logout))
-        .route("/api/register", post(create_user))
-        .route("/api/register/send_code", post(send_verification_code))
-        .route("/api/login", post(login_check))
         .route("/api/me", get(current_user))
         .route("/api/logout", post(logout))
         .merge(forum::forum_routes())
-        .with_state(pool);
+        .route_layer(middleware::from_fn_with_state(
+            rate_limiter,
+            rate_limit_middleware,
+        ))
+        .with_state(pool.clone());
+
+    let app = auth_routes.merge(general_routes);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:7878").await?;
     axum::serve(listener, app).await?;
     Ok(())
