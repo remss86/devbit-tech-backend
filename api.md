@@ -261,7 +261,7 @@
 
 ### 4.10 修改自己的帖子
 - **函数名**：`modify_post`
-- **URL**：`GET /api/forum/posts/myposts/modify_post`
+- **URL**：`PUT /api/forum/posts/myposts/modify_post`
 - **需要认证**：是
 - **功能**：修改自己的帖子
 ---
