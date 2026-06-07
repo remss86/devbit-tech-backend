@@ -573,21 +573,23 @@ async fn my_posts(
     headers: HeaderMap,
 )->Result<Json<Vec<ForumPost>>, StatusCode>{
     let user_id = require_user_id(&headers)?;
-    let rows =sqlx::query("SELECT id,
-            title,
-            content,
-            author_id,
-            category,
-            tags,
-            created_at,
-            updated_at,
-            view_count,
-            is_pinned,
-            is_locked FROM forum_posts WHERE author_id = $1;")
-            .bind(user_id)
-            .fetch_all(&pool)
-            .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let rows = sqlx::query(
+        "SELECT p.id, p.title, p.content, p.author_id, p.category, p.tags,
+                p.created_at, p.updated_at, p.view_count::BIGINT as view_count,
+                p.is_pinned, p.is_locked, u.name as author_name,
+                (SELECT COUNT(*) FROM forum_comments WHERE post_id = p.id)::BIGINT as comment_count,
+                COUNT(l.user_id)::BIGINT as like_count,
+                COALESCE(BOOL_OR(l.user_id = $1), false) as liked_by_me
+         FROM forum_posts p
+         JOIN users u ON u.id = p.author_id
+         WHERE u.id = $1
+         GROUP BY p.id, u.name
+         ORDER BY p.is_pinned DESC, p.created_at DESC",
+    )
+    .bind(user_id)
+    .fetch_all(&pool)
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(rows.iter().map(row_to_post).collect()))
 }
 
