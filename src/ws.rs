@@ -38,18 +38,18 @@ impl WsState {
     /// Send a JSON message to all connections of a user.
     pub fn send_to_user(&self, user_id: i32, json: &str) {
         if let Some(ref mut senders) = self.connections.get_mut(&user_id) {
-            let msg = Message::Text(json.to_string().into());
-            senders.retain(|(tx, _)| tx.send(msg.clone()).is_ok());
+            let text = json.to_string();
+            senders.retain(|(tx, _)| tx.send(Message::Text(text.clone().into())).is_ok());
         }
     }
 
     /// Broadcast a JSON message to all connected users.
     #[allow(dead_code)]
     pub fn broadcast(&self, json: &str) {
-        let msg = Message::Text(json.to_string().into());
+        let text = json.to_string();
         for mut entry in self.connections.iter_mut() {
             let senders = entry.value_mut();
-            senders.retain(|(tx, _)| tx.send(msg.clone()).is_ok());
+            senders.retain(|(tx, _)| tx.send(Message::Text(text.clone().into())).is_ok());
         }
     }
 }
