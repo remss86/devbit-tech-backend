@@ -2,12 +2,14 @@
 name = "devbit"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.88"
 
 [dependencies]
-axum = {version = "0.8.8"}
+axum = { version = "0.8.8", features = ["ws", "multipart"] }
 tokio = {version = "1.50.0",features = ["full"]}
-sqlx = {version = "0.8.6",features = ["runtime-tokio","postgres","chrono"]}
-serde = {version = "1.0.228"}
+sqlx = {version = "0.8.6",features = ["runtime-tokio","postgres","chrono","migrate"]}
+serde = {version = "1.0.228", features = ["derive"]}
+serde_json = "1.0"
 rand = {version = "0.10.0"}
 chrono = {version = "0.4.44", features = ["serde"]}
 jsonwebtoken ={version = "10.3.0",features = ["rust_crypto"]}
@@ -16,3 +18,10 @@ dotenv = {version = "0.15.0"}
 base64 = "0.22.1"
 hmac = "0.12.1"
 sha2 = "0.10.9"
+uuid = {version = "1.18.1", features = ["v4"]}
+mime_guess = "2.0.5"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "time"] }
+tracing-appender = "0.2"
+dashmap = "6.1"
+futures-util = "0.3"

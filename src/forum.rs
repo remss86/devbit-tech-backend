@@ -1,23 +1,13 @@
+use crate::auth;
 use axum::{
-    Json, Router,
+    Extension, Json, Router,
     extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
     routing::{delete, get, put},
 };
 use chrono::{DateTime, Utc};
-use jsonwebtoken::{DecodingKey, Validation, decode};
 use serde::{Deserialize, Serialize};
 use sqlx::{Pool, Postgres, Row, postgres::PgRow};
-use std::env;
-
-const AUTH_COOKIE_NAME: &str = "auth_token";
-
-#[derive(Debug, Clone, Deserialize)]
-struct Claims {
-    sub: i32,
-    #[serde(rename = "exp")]
-    _exp: usize,
-}
 
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -25,6 +15,8 @@ pub struct ForumUser {
     pub id: i32,
     pub name: String,
     pub avatar: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub avatar_url: Option<String>,
     pub is_admin: bool,
 }
 
@@ -84,6 +76,11 @@ pub struct CreatePostRequest {
     pub content: String,
     pub category: Option<String>,
     pub tags: Option<Vec<String>>,
+}
+
+#[derive(Deserialize)]
+pub struct UpdatePostRequest {
+    pub content: String,
 }
 
 #[derive(Deserialize)]
@@ -165,61 +162,27 @@ fn avatar_for_user(id: i32, name: &str) -> String {
 
     if initials.is_empty() {
         initials = name.chars().take(2).collect::<String>().to_uppercase();
-    } else if initials.len() == 1 {
-        if let Some(next) = name.chars().find(|ch| ch.is_ascii_lowercase()) {
-            initials.push(next.to_ascii_uppercase());
-        }
+    } else if initials.len() == 1
+        && let Some(next) = name.chars().find(|ch| ch.is_ascii_lowercase())
+    {
+        initials.push(next.to_ascii_uppercase());
     }
 
     initials
 }
 
-fn forum_user(id: i32, name: String) -> ForumUser {
+fn forum_user(id: i32, name: String, avatar_url: Option<String>) -> ForumUser {
     ForumUser {
         id,
         avatar: avatar_for_user(id, &name),
         name,
-        is_admin: id == 1 || id == 2,
+        avatar_url,
+        is_admin: auth::is_admin_user(id),
     }
-}
-
-fn token_from_headers(headers: &HeaderMap) -> Option<String> {
-    if let Some(token) = headers
-        .get("authorization")
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "))
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        return Some(token.to_string());
-    }
-
-    headers
-        .get("cookie")
-        .and_then(|value| value.to_str().ok())
-        .and_then(|cookies| {
-            cookies.split(';').find_map(|cookie| {
-                cookie
-                    .trim()
-                    .strip_prefix(&format!("{AUTH_COOKIE_NAME}="))
-                    .map(str::to_string)
-            })
-        })
-}
-
-fn user_id_from_token(token: &str) -> Option<i32> {
-    let secret = env::var("JWT_SECRET").unwrap_or_else(|_| "devbit-local-secret".to_string());
-    let data = decode::<Claims>(
-        token,
-        &DecodingKey::from_secret(secret.as_bytes()),
-        &Validation::default(),
-    )
-    .ok()?;
-    Some(data.claims.sub)
 }
 
 fn optional_user_id(headers: &HeaderMap) -> Option<i32> {
-    token_from_headers(headers).and_then(|token| user_id_from_token(&token))
+    auth::user_id_from_headers(headers)
 }
 
 fn require_user_id(headers: &HeaderMap) -> Result<i32, StatusCode> {
@@ -227,13 +190,13 @@ fn require_user_id(headers: &HeaderMap) -> Result<i32, StatusCode> {
 }
 
 async fn get_current_user(pool: &Pool<Postgres>, user_id: i32) -> Result<ForumUser, StatusCode> {
-    let row = sqlx::query("SELECT id, name FROM users WHERE id = $1")
+    let row = sqlx::query("SELECT id, name, avatar_url FROM users WHERE id = $1")
         .bind(user_id)
         .fetch_optional(pool)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    row.map(|r| forum_user(r.get("id"), r.get("name")))
+    row.map(|r| forum_user(r.get("id"), r.get("name"), r.get("avatar_url")))
         .ok_or(StatusCode::UNAUTHORIZED)
 }
 
@@ -303,12 +266,13 @@ async fn require_comment_moderator(
 fn row_to_post(row: &PgRow) -> ForumPost {
     let author_id: i32 = row.get("author_id");
     let author_name: String = row.get("author_name");
+    let author_avatar_url: Option<String> = row.get("author_avatar_url");
 
     ForumPost {
         id: row.get("id"),
         title: row.get("title"),
         content: row.get("content"),
-        author: forum_user(author_id, author_name),
+        author: forum_user(author_id, author_name, author_avatar_url),
         category: row.get("category"),
         tags: row.get::<Vec<String>, _>("tags"),
         created_at: row.get::<DateTime<Utc>, _>("created_at").to_rfc3339(),
@@ -328,8 +292,16 @@ fn row_to_message(row: &PgRow) -> ForumMessage {
 
     ForumMessage {
         id: row.get("id"),
-        sender: forum_user(sender_id, row.get("sender_name")),
-        recipient: forum_user(recipient_id, row.get("recipient_name")),
+        sender: forum_user(
+            sender_id,
+            row.get("sender_name"),
+            row.get("sender_avatar_url"),
+        ),
+        recipient: forum_user(
+            recipient_id,
+            row.get("recipient_name"),
+            row.get("recipient_avatar_url"),
+        ),
         content: row.get("content"),
         created_at: row.get::<DateTime<Utc>, _>("created_at").to_rfc3339(),
         is_read: row.get("is_read"),
@@ -342,27 +314,31 @@ fn row_to_comment(row: &PgRow) -> ForumComment {
     ForumComment {
         id: row.get("id"),
         post_id: row.get("post_id"),
-        author: forum_user(author_id, row.get("author_name")),
+        author: forum_user(
+            author_id,
+            row.get("author_name"),
+            row.get("author_avatar_url"),
+        ),
         content: row.get("content"),
         created_at: row.get::<DateTime<Utc>, _>("created_at").to_rfc3339(),
     }
 }
 
 async fn fetch_users(pool: &Pool<Postgres>) -> Result<Vec<ForumUser>, StatusCode> {
-    let rows = sqlx::query("SELECT id, name FROM users ORDER BY id ASC")
+    let rows = sqlx::query("SELECT id, name, avatar_url FROM users ORDER BY id ASC")
         .fetch_all(pool)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok(rows
         .iter()
-        .map(|row| forum_user(row.get("id"), row.get("name")))
+        .map(|row| forum_user(row.get("id"), row.get("name"), row.get("avatar_url")))
         .collect())
 }
 
 async fn fetch_comments(pool: &Pool<Postgres>) -> Result<Vec<ForumComment>, StatusCode> {
     let rows = sqlx::query(
-        "SELECT c.*, u.name as author_name
+        "SELECT c.*, u.name as author_name, u.avatar_url as author_avatar_url
          FROM forum_comments c
          JOIN users u ON u.id = c.author_id
          ORDER BY c.created_at ASC",
@@ -382,7 +358,7 @@ async fn fetch_post_by_id(
     let row = sqlx::query(
         "SELECT p.id, p.title, p.content, p.author_id, p.category, p.tags,
                 p.created_at, p.updated_at, p.view_count::BIGINT as view_count,
-                p.is_pinned, p.is_locked, u.name as author_name,
+                p.is_pinned, p.is_locked, u.name as author_name, u.avatar_url as author_avatar_url,
                 (SELECT COUNT(*) FROM forum_comments WHERE post_id = p.id)::BIGINT as comment_count,
                 COUNT(l.user_id)::BIGINT as like_count,
                 COALESCE(BOOL_OR(l.user_id = $1), false) as liked_by_me
@@ -390,7 +366,7 @@ async fn fetch_post_by_id(
          JOIN users u ON u.id = p.author_id
          LEFT JOIN forum_post_likes l ON l.post_id = p.id
          WHERE p.id = $2
-         GROUP BY p.id, u.name",
+         GROUP BY p.id, u.name, u.avatar_url",
     )
     .bind(viewer_user_id)
     .bind(id)
@@ -408,8 +384,8 @@ async fn fetch_messages_for_user(
 ) -> Result<Vec<ForumMessage>, StatusCode> {
     let rows = sqlx::query(
         "SELECT m.id, m.sender_id, m.recipient_id, m.content, m.created_at, m.is_read,
-                s.name as sender_name,
-                r.name as recipient_name
+                s.name as sender_name, s.avatar_url as sender_avatar_url,
+                r.name as recipient_name, r.avatar_url as recipient_avatar_url
          FROM forum_messages m
          JOIN users s ON s.id = m.sender_id
          JOIN users r ON r.id = m.recipient_id
@@ -460,7 +436,7 @@ async fn fetch_posts(
         sqlx::query(
             "SELECT p.id, p.title, p.content, p.author_id, p.category, p.tags,
                     p.created_at, p.updated_at, p.view_count::BIGINT as view_count,
-                    p.is_pinned, p.is_locked, u.name as author_name,
+                    p.is_pinned, p.is_locked, u.name as author_name, u.avatar_url as author_avatar_url,
                     (SELECT COUNT(*) FROM forum_comments WHERE post_id = p.id)::BIGINT as comment_count,
                     COUNT(l.user_id)::BIGINT as like_count,
                     COALESCE(BOOL_OR(l.user_id = $1), false) as liked_by_me
@@ -468,7 +444,7 @@ async fn fetch_posts(
              JOIN users u ON u.id = p.author_id
              LEFT JOIN forum_post_likes l ON l.post_id = p.id
              WHERE p.category = $2
-             GROUP BY p.id, u.name
+             GROUP BY p.id, u.name, u.avatar_url
              ORDER BY p.is_pinned DESC, p.created_at DESC",
         )
         .bind(viewer_user_id)
@@ -479,14 +455,14 @@ async fn fetch_posts(
         sqlx::query(
             "SELECT p.id, p.title, p.content, p.author_id, p.category, p.tags,
                     p.created_at, p.updated_at, p.view_count::BIGINT as view_count,
-                    p.is_pinned, p.is_locked, u.name as author_name,
+                    p.is_pinned, p.is_locked, u.name as author_name, u.avatar_url as author_avatar_url,
                     (SELECT COUNT(*) FROM forum_comments WHERE post_id = p.id)::BIGINT as comment_count,
                     COUNT(l.user_id)::BIGINT as like_count,
                     COALESCE(BOOL_OR(l.user_id = $1), false) as liked_by_me
              FROM forum_posts p
              JOIN users u ON u.id = p.author_id
              LEFT JOIN forum_post_likes l ON l.post_id = p.id
-             GROUP BY p.id, u.name
+             GROUP BY p.id, u.name, u.avatar_url
              ORDER BY p.is_pinned DESC, p.created_at DESC",
         )
         .bind(viewer_user_id)
@@ -569,21 +545,23 @@ async fn create_post(
 }
 
 async fn my_posts(
-    State(pool):State<Pool<Postgres>>,
+    State(pool): State<Pool<Postgres>>,
     headers: HeaderMap,
-)->Result<Json<Vec<ForumPost>>, StatusCode>{
+) -> Result<Json<Vec<ForumPost>>, StatusCode> {
     let user_id = require_user_id(&headers)?;
     let rows = sqlx::query(
         "SELECT p.id, p.title, p.content, p.author_id, p.category, p.tags,
                 p.created_at, p.updated_at, p.view_count::BIGINT as view_count,
                 p.is_pinned, p.is_locked, u.name as author_name,
+                u.avatar_url as author_avatar_url,
                 (SELECT COUNT(*) FROM forum_comments WHERE post_id = p.id)::BIGINT as comment_count,
                 COUNT(l.user_id)::BIGINT as like_count,
                 COALESCE(BOOL_OR(l.user_id = $1), false) as liked_by_me
          FROM forum_posts p
          JOIN users u ON u.id = p.author_id
+         LEFT JOIN forum_post_likes l ON l.post_id = p.id
          WHERE u.id = $1
-         GROUP BY p.id, u.name
+         GROUP BY p.id, u.name, u.avatar_url
          ORDER BY p.is_pinned DESC, p.created_at DESC",
     )
     .bind(user_id)
@@ -593,21 +571,25 @@ async fn my_posts(
     Ok(Json(rows.iter().map(row_to_post).collect()))
 }
 
-async fn modify_post(State(pool):State<Pool<Postgres>>
-,Path(id):Path<i32>
-,headers: HeaderMap
-,Json(payload): Json<ForumPost>)->Result<StatusCode,StatusCode>{
+async fn modify_post(
+    State(pool): State<Pool<Postgres>>,
+    Path(id): Path<i32>,
+    headers: HeaderMap,
+    Json(payload): Json<UpdatePostRequest>,
+) -> Result<StatusCode, StatusCode> {
     let user = require_current_user(&pool, &headers).await?;
     require_post_moderator(&pool, id, &user).await?;
 
-    let result = sqlx::query("UPDATE forum_posts 
+    let result = sqlx::query(
+        "UPDATE forum_posts
 SET content = $1,updated_at = NOW() 
-WHERE id = $2;")
-        .bind(payload.content)
-        .bind(id)
-        .execute(&pool)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+WHERE id = $2;",
+    )
+    .bind(payload.content)
+    .bind(id)
+    .execute(&pool)
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     if result.rows_affected() == 0 {
         Err(StatusCode::NOT_FOUND)
@@ -737,7 +719,7 @@ async fn list_comments(
     Path(post_id): Path<i32>,
 ) -> Result<Json<Vec<ForumComment>>, StatusCode> {
     let rows = sqlx::query(
-        "SELECT c.*, u.name as author_name
+        "SELECT c.*, u.name as author_name, u.avatar_url as author_avatar_url
          FROM forum_comments c
          JOIN users u ON u.id = c.author_id
          WHERE c.post_id = $1
@@ -828,6 +810,7 @@ async fn list_messages(
 
 async fn send_message(
     State(pool): State<Pool<Postgres>>,
+    Extension(ws_state): Extension<crate::ws::WsState>,
     headers: HeaderMap,
     Json(payload): Json<SendMessageRequest>,
 ) -> Result<Json<ForumMessage>, StatusCode> {
@@ -848,14 +831,38 @@ async fn send_message(
 
     let created_at: DateTime<Utc> = row.get("created_at");
 
-    Ok(Json(ForumMessage {
+    let message = ForumMessage {
         id: row.get("id"),
-        sender,
-        recipient,
-        content: payload.content,
+        sender: sender.clone(),
+        recipient: recipient.clone(),
+        content: payload.content.clone(),
         created_at: created_at.to_rfc3339(),
         is_read: false,
-    }))
+    };
+
+    // Push WebSocket notification to recipient
+    let content_preview = message_preview(&payload.content);
+    let ws_msg = serde_json::json!({
+        "type": "new_message",
+        "message_id": message.id,
+        "sender_id": sender.id,
+        "sender_name": sender.name,
+        "content_preview": content_preview,
+    });
+    ws_state.send_to_user(payload.recipient_id, &ws_msg.to_string());
+
+    Ok(Json(message))
+}
+
+fn message_preview(content: &str) -> String {
+    let mut chars = content.chars();
+    let first_sixty: String = chars.by_ref().take(60).collect();
+
+    if chars.next().is_none() {
+        first_sixty
+    } else {
+        format!("{}...", first_sixty.chars().take(57).collect::<String>())
+    }
 }
 
 async fn mark_message_read(
@@ -918,7 +925,7 @@ async fn search_posts(
     let rows = sqlx::query(
         "SELECT p.id, p.title, p.content, p.author_id, p.category, p.tags,
                 p.created_at, p.updated_at, p.view_count::BIGINT as view_count,
-                p.is_pinned, p.is_locked, u.name as author_name,
+                p.is_pinned, p.is_locked, u.name as author_name, u.avatar_url as author_avatar_url,
                 (SELECT COUNT(*) FROM forum_comments WHERE post_id = p.id)::BIGINT as comment_count,
                 COUNT(l.user_id)::BIGINT as like_count,
                 COALESCE(BOOL_OR(l.user_id = $1), false) as liked_by_me
@@ -927,7 +934,7 @@ async fn search_posts(
          LEFT JOIN forum_post_likes l ON l.post_id = p.id
          WHERE LOWER(p.title) LIKE $2 ESCAPE '\\'
             OR LOWER(p.content) LIKE $2 ESCAPE '\\'
-         GROUP BY p.id, u.name
+         GROUP BY p.id, u.name, u.avatar_url
          ORDER BY p.is_pinned DESC, p.created_at DESC",
     )
     .bind(optional_user_id(&headers))
@@ -946,7 +953,7 @@ async fn list_friends(
     let user = require_current_user(&pool, &headers).await?;
 
     let rows = sqlx::query(
-        "SELECT u.id, u.name, f.created_at
+        "SELECT u.id, u.name, u.avatar_url, f.created_at
          FROM friends f
          JOIN users u ON u.id = f.friend_id
          WHERE f.user_id = $1
@@ -962,9 +969,10 @@ async fn list_friends(
             .map(|row| {
                 let id: i32 = row.get("id");
                 let name: String = row.get("name");
+                let avatar_url: Option<String> = row.get("avatar_url");
                 let created_at: DateTime<Utc> = row.get("created_at");
                 FriendInfo {
-                    user: forum_user(id, name),
+                    user: forum_user(id, name, avatar_url),
                     created_at: created_at.to_rfc3339(),
                 }
             })
@@ -1040,7 +1048,7 @@ async fn search_users(
 
     let search = LikeSearch::new(query);
     let rows = sqlx::query(
-        "SELECT id, name FROM users
+        "SELECT id, name, avatar_url FROM users
          WHERE LOWER(name) LIKE $1 ESCAPE '\\'
          ORDER BY
             CASE WHEN LOWER(name) LIKE $2 ESCAPE '\\' THEN 0 ELSE 1 END,
@@ -1058,7 +1066,7 @@ async fn search_users(
 
     Ok(Json(
         rows.iter()
-            .map(|row| forum_user(row.get("id"), row.get("name")))
+            .map(|row| forum_user(row.get("id"), row.get("name"), row.get("avatar_url")))
             .collect(),
     ))
 }
@@ -1088,5 +1096,45 @@ pub fn forum_routes() -> Router<Pool<Postgres>> {
         .route("/api/forum/friends/{friend_id}", delete(remove_friend))
         .route("/api/forum/users/search", get(search_users))
         .route("/api/forum/posts/myposts", get(my_posts))
-        .route("/api/forum/posts/myposts/modify_post",put(modify_post))
+        .route(
+            "/api/forum/posts/myposts/modify_post/{id}",
+            put(modify_post),
+        )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{UpdatePostRequest, message_preview};
+
+    #[test]
+    fn message_preview_preserves_up_to_sixty_characters() {
+        for value in [
+            "a".repeat(60),
+            '\u{754c}'.to_string().repeat(60),
+            '\u{1f600}'.to_string().repeat(60),
+        ] {
+            assert_eq!(message_preview(&value), value);
+        }
+    }
+
+    #[test]
+    fn message_preview_truncates_by_unicode_characters() {
+        for character in ['a', '\u{754c}', '\u{1f600}'] {
+            let value = character.to_string().repeat(61);
+            assert_eq!(
+                message_preview(&value),
+                format!("{}...", character.to_string().repeat(57))
+            );
+        }
+    }
+
+    #[test]
+    fn update_post_request_only_requires_content() {
+        let payload: UpdatePostRequest = serde_json::from_str(
+            r#"{"content":"updated","id":7,"title":"ignored for compatibility"}"#,
+        )
+        .unwrap();
+
+        assert_eq!(payload.content, "updated");
+    }
 }
