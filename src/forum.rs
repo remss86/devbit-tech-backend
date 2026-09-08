@@ -637,7 +637,7 @@ async fn toggle_pin(
         return Err(StatusCode::NOT_FOUND);
     }
 
-    Ok(Json(fetch_post_by_id(&pool, id, None).await?))
+    Ok(Json(fetch_post_by_id(&pool, id, Some(user.id)).await?))
 }
 
 async fn toggle_lock(
@@ -658,7 +658,7 @@ async fn toggle_lock(
         return Err(StatusCode::NOT_FOUND);
     }
 
-    Ok(Json(fetch_post_by_id(&pool, id, None).await?))
+    Ok(Json(fetch_post_by_id(&pool, id, Some(user.id)).await?))
 }
 
 async fn toggle_like(
@@ -894,7 +894,16 @@ async fn mark_conversation_read(
     headers: HeaderMap,
 ) -> Result<StatusCode, StatusCode> {
     let user = require_current_user(&pool, &headers).await?;
-    let result = sqlx::query(
+    let partner_exists: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM users WHERE id = $1)")
+            .bind(partner_id)
+            .fetch_one(&pool)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    if !partner_exists {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    sqlx::query(
         "UPDATE forum_messages SET is_read = true
          WHERE sender_id = $1 AND recipient_id = $2 AND is_read = false",
     )
@@ -904,11 +913,8 @@ async fn mark_conversation_read(
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    if result.rows_affected() == 0 {
-        Err(StatusCode::NOT_FOUND)
-    } else {
-        Ok(StatusCode::NO_CONTENT)
-    }
+    // Reopening a conversation with no unread messages is a successful no-op.
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn search_posts(
