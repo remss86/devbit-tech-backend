@@ -1,3 +1,8 @@
 /target
 .env
 /uploads
+
+# Local editor metadata and runtime logs
+.idea/
+*.log
+/logs/

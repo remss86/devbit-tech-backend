@@ -7,6 +7,20 @@ on:
 jobs:
   rust:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: integration
+          POSTGRES_DB: devbit_integration
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -30,3 +44,25 @@ jobs:
 
       - name: Check all targets
         run: cargo check --all-targets --all-features --locked
+
+      - name: Set up Node for HTTP and WebSocket integration checks
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Test against PostgreSQL
+        env:
+          NODE_ENV: test
+          DATABASE_URL: postgres://postgres:integration@127.0.0.1:5432/devbit_integration
+          JWT_SECRET: devbit-ci-only-secret
+          INTEGRATION_BASE_URL: http://127.0.0.1:7878/api
+        run: |
+          cargo build --locked
+          target/debug/devbit > integration-server.log 2>&1 &
+          backend_pid=$!
+          trap 'kill "$backend_pid"' EXIT
+          for attempt in {1..30}; do
+            if curl --fail --silent http://127.0.0.1:7878/api/health; then break; fi
+            sleep 1
+          done
+          node scripts/integration.mjs

@@ -85,7 +85,7 @@ proxy_set_header X-Real-IP $remote_addr;
 proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
 ```
 
-Authentication endpoints are limited to 5 requests per 60 seconds per client IP. Other REST endpoints are limited to 10 requests per 60 seconds. Health and WebSocket upgrade routes are not rate limited.
+Authentication endpoints are limited to 5 requests per 60 seconds per client IP. Other REST endpoints are limited to 120 requests per 60 seconds. Health and WebSocket upgrade routes are not rate limited.
 
 ## Quality checks
 
@@ -97,6 +97,20 @@ cargo test --all-targets
 cargo clippy --all-targets --all-features -- -D warnings
 cargo check --all-targets
 ```
+
+## Integration checks
+
+Use a disposable PostgreSQL database and start the backend with `NODE_ENV=test`
+and `DATABASE_URL` pointing to it. With the Nuxt frontend running on port 3000,
+run `node scripts/integration.mjs` (Node.js 22 or newer). Set
+`INTEGRATION_BASE_URL=http://127.0.0.1:7878/api` to test the backend directly.
+For a backend on another local port, also set `INTEGRATION_WS_URL` to its
+WebSocket endpoint (default `ws://127.0.0.1:7878/api/ws`).
+The script creates test accounts and exercises authentication, forum mutations,
+permissions, friends, messages, avatars, WebSockets, and rate limits. It uses
+simulated proxy IPs for independent scenarios; run it only on a local test server.
+CI runs this script against a fresh PostgreSQL service, including administrator
+checks for the initial administrator account.
 
 ## License
 
