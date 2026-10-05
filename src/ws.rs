@@ -1,7 +1,8 @@
 use axum::{
     Extension,
     extract::ws::{Message, WebSocket, WebSocketUpgrade},
-    response::IntoResponse,
+    http::{HeaderMap, StatusCode},
+    response::{IntoResponse, Response},
 };
 use dashmap::DashMap;
 use futures_util::{SinkExt, StreamExt};
@@ -20,7 +21,7 @@ type Tx = mpsc::Sender<Message>;
 
 const OUTBOUND_QUEUE_CAPACITY: usize = 64;
 const MAX_WEBSOCKET_MESSAGE_SIZE: usize = 64 * 1024;
-const AUTH_TIMEOUT: Duration = Duration::from_secs(10);
+const AUTH_COOKIE_NAME: &str = "auth_token";
 
 #[derive(Clone)]
 pub struct WsState {
@@ -72,8 +73,6 @@ fn enqueue(tx: &Tx, message: Message) -> bool {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ClientMessage {
-    /// Authentication: sent as first message after connect
-    Auth { token: String },
     /// Heartbeat ping
     Ping,
     /// Subscribe to a channel
@@ -82,24 +81,8 @@ enum ClientMessage {
     Unsubscribe { channel: String },
 }
 
-fn parse_application_message(
-    text: &str,
-    authenticated: bool,
-) -> Result<ClientMessage, &'static str> {
-    let message = serde_json::from_str::<ClientMessage>(text).map_err(|_| {
-        if authenticated {
-            "Invalid message"
-        } else {
-            "Authentication must be the first message"
-        }
-    })?;
-
-    match (&message, authenticated) {
-        (ClientMessage::Auth { .. }, true) => Err("Already authenticated"),
-        (ClientMessage::Auth { .. }, false) => Ok(message),
-        (_, false) => Err("Authentication must be the first message"),
-        (_, true) => Ok(message),
-    }
+fn parse_application_message(text: &str) -> Result<ClientMessage, &'static str> {
+    serde_json::from_str::<ClientMessage>(text).map_err(|_| "Invalid message")
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -109,8 +92,6 @@ enum ServerMessage {
     Pong,
     /// Authentication result
     AuthOk { user_id: i32 },
-    /// Authentication failed
-    AuthError { reason: String },
     /// User came online
     UserOnline { user_id: i32 },
     /// User went offline
@@ -119,19 +100,39 @@ enum ServerMessage {
 
 // ── JWT validation for WebSocket ────────────────────────────────────────────
 
-fn user_id_from_token(token: &str) -> Option<i32> {
-    let secret = std::env::var("JWT_SECRET").unwrap_or_else(|_| "devbit-local-secret".to_string());
+fn token_from_headers(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get("cookie")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|cookies| {
+            cookies.split(';').find_map(|cookie| {
+                cookie
+                    .trim()
+                    .strip_prefix(&format!("{AUTH_COOKIE_NAME}="))
+                    .filter(|token| !token.is_empty())
+            })
+        })
+}
+
+fn user_id_from_token_with_secret(token: &str, secret: &str) -> Option<i32> {
     #[derive(serde::Deserialize)]
     struct Claims {
         sub: i32,
     }
+    let mut validation = jsonwebtoken::Validation::default();
+    validation.leeway = 0;
     let data = jsonwebtoken::decode::<Claims>(
         token,
         &jsonwebtoken::DecodingKey::from_secret(secret.as_bytes()),
-        &jsonwebtoken::Validation::default(),
+        &validation,
     )
     .ok()?;
     Some(data.claims.sub)
+}
+
+fn user_id_from_token(token: &str) -> Option<i32> {
+    let secret = std::env::var("JWT_SECRET").unwrap_or_else(|_| "devbit-local-secret".to_string());
+    user_id_from_token_with_secret(token, &secret)
 }
 
 // ── WebSocket handler ───────────────────────────────────────────────────────
@@ -141,14 +142,32 @@ const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(90);
 
 pub async fn ws_handler(
     ws: WebSocketUpgrade,
+    headers: HeaderMap,
     Extension(ws_state): Extension<WsState>,
-) -> impl IntoResponse {
-    ws.max_frame_size(MAX_WEBSOCKET_MESSAGE_SIZE)
+) -> Result<Response, StatusCode> {
+    let token = token_from_headers(&headers).ok_or(StatusCode::UNAUTHORIZED)?;
+    let user_id = user_id_from_token(token).ok_or(StatusCode::UNAUTHORIZED)?;
+    let user_exists =
+        sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM users WHERE id = $1)")
+            .bind(user_id)
+            .fetch_one(&ws_state.pool)
+            .await
+            .map_err(|error| {
+                warn!(%error, "failed to validate WebSocket user");
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
+    if !user_exists {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+
+    Ok(ws
+        .max_frame_size(MAX_WEBSOCKET_MESSAGE_SIZE)
         .max_message_size(MAX_WEBSOCKET_MESSAGE_SIZE)
-        .on_upgrade(move |socket| handle_socket(socket, ws_state))
+        .on_upgrade(move |socket| handle_socket(socket, ws_state, user_id))
+        .into_response())
 }
 
-async fn handle_socket(socket: WebSocket, ws_state: WsState) {
+async fn handle_socket(socket: WebSocket, ws_state: WsState, user_id: i32) {
     let (mut sender_tx, mut receiver_rx) = socket.split();
     let (tx, mut rx) = mpsc::channel::<Message>(OUTBOUND_QUEUE_CAPACITY);
 
@@ -161,68 +180,38 @@ async fn handle_socket(socket: WebSocket, ws_state: WsState) {
         }
     });
 
-    let mut user_id: Option<i32> = None;
     let mut last_heartbeat = Instant::now();
-    let mut authenticated = false;
-    let auth_deadline = tokio::time::sleep(AUTH_TIMEOUT);
-    tokio::pin!(auth_deadline);
+
+    ws_state
+        .connections
+        .entry(user_id)
+        .or_default()
+        .push(tx.clone());
+    debug!(user_id, "WebSocket authenticated");
+
+    let online_msg =
+        serde_json::to_string(&ServerMessage::UserOnline { user_id }).unwrap_or_default();
+    ws_state.broadcast(&online_msg);
+    enqueue(
+        &tx,
+        Message::Text(
+            serde_json::to_string(&ServerMessage::AuthOk { user_id })
+                .unwrap_or_default()
+                .into(),
+        ),
+    );
 
     // Heartbeat ticker
     let mut heartbeat_timer = tokio::time::interval(HEARTBEAT_INTERVAL);
 
     loop {
         tokio::select! {
-            _ = &mut auth_deadline, if !authenticated => {
-                let error = serde_json::to_string(&ServerMessage::AuthError {
-                    reason: "Authentication timed out".into(),
-                }).unwrap_or_default();
-                enqueue(&tx, Message::Text(error.into()));
-                break;
-            }
             // Incoming messages from client
             msg = receiver_rx.next() => {
                 match msg {
                     Some(Ok(Message::Text(text))) => {
-                        match parse_application_message(&text, authenticated) {
+                        match parse_application_message(&text) {
                             Ok(client_msg) => match client_msg {
-                                ClientMessage::Auth { token } => {
-                                    match user_id_from_token(&token) {
-                                        Some(uid) => {
-                                            user_id = Some(uid);
-                                            authenticated = true;
-                                            debug!(user_id = uid, "WebSocket authenticated");
-
-                                            // Register connection
-                                            ws_state.connections
-                                                .entry(uid)
-                                                .or_default()
-                                                .push(tx.clone());
-
-                                            // Broadcast online status
-                                            let online_msg = serde_json::to_string(
-                                                &ServerMessage::UserOnline { user_id: uid }
-                                            ).unwrap_or_default();
-                                            ws_state.broadcast(&online_msg);
-
-                                            // Send auth confirmation
-                                            enqueue(&tx, Message::Text(
-                                                serde_json::to_string(
-                                                    &ServerMessage::AuthOk { user_id: uid }
-                                                ).unwrap_or_default().into()
-                                            ));
-                                        }
-                                        None => {
-                                            enqueue(&tx, Message::Text(
-                                                serde_json::to_string(
-                                                    &ServerMessage::AuthError {
-                                                        reason: "Invalid token".into()
-                                                    }
-                                                ).unwrap_or_default().into()
-                                            ));
-                                            break;
-                                        }
-                                    }
-                                }
                                 ClientMessage::Ping => {
                                     last_heartbeat = Instant::now();
                                     enqueue(&tx, Message::Text(
@@ -243,9 +232,7 @@ async fn handle_socket(socket: WebSocket, ws_state: WsState) {
                                 }
                             },
                             Err(reason) => {
-                                let error = serde_json::to_string(&ServerMessage::AuthError {
-                                    reason: reason.into(),
-                                }).unwrap_or_default();
+                                let error = format!(r#"{{"type":"error","reason":"{reason}"}}"#);
                                 enqueue(&tx, Message::Text(error.into()));
                                 break;
                             }
@@ -262,13 +249,9 @@ async fn handle_socket(socket: WebSocket, ws_state: WsState) {
                         last_heartbeat = Instant::now();
                     }
                     Some(Ok(Message::Binary(_))) => {
-                        if !authenticated {
-                            let error = serde_json::to_string(&ServerMessage::AuthError {
-                                reason: "Authentication must be the first message".into(),
-                            }).unwrap_or_default();
-                            enqueue(&tx, Message::Text(error.into()));
-                            break;
-                        }
+                        let error = r#"{"type":"error","reason":"Invalid message"}"#;
+                        enqueue(&tx, Message::Text(error.into()));
+                        break;
                     }
                     Some(Err(e)) => {
                         warn!("WebSocket error: {}", e);
@@ -281,7 +264,7 @@ async fn handle_socket(socket: WebSocket, ws_state: WsState) {
             _ = heartbeat_timer.tick() => {
                 let elapsed = last_heartbeat.elapsed();
                 if elapsed > HEARTBEAT_TIMEOUT {
-                    warn!(?user_id, "WebSocket heartbeat timeout");
+                    warn!(user_id, "WebSocket heartbeat timeout");
                     break;
                 }
                 // Send server ping
@@ -291,22 +274,22 @@ async fn handle_socket(socket: WebSocket, ws_state: WsState) {
     }
 
     // ── Cleanup on disconnect ────────────────────────────────────────────
-    if let Some(uid) = user_id {
+    {
         // Remove this connection
-        if let Some(mut senders) = ws_state.connections.get_mut(&uid) {
+        if let Some(mut senders) = ws_state.connections.get_mut(&user_id) {
             senders.retain(|sender| !sender.same_channel(&tx));
         }
         let removed = ws_state
             .connections
-            .remove_if(&uid, |_, senders| senders.is_empty())
+            .remove_if(&user_id, |_, senders| senders.is_empty())
             .is_some();
 
         // Broadcast offline if no other connections remain
         if removed {
-            let offline_msg = serde_json::to_string(&ServerMessage::UserOffline { user_id: uid })
-                .unwrap_or_default();
+            let offline_msg =
+                serde_json::to_string(&ServerMessage::UserOffline { user_id }).unwrap_or_default();
             ws_state.broadcast(&offline_msg);
-            info!(user_id = uid, "User offline (all connections closed)");
+            info!(user_id, "User offline (all connections closed)");
         }
     }
 
@@ -324,21 +307,64 @@ async fn handle_socket(socket: WebSocket, ws_state: WsState) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use jsonwebtoken::{EncodingKey, Header, encode};
+    use serde::Serialize;
 
     #[test]
-    fn authentication_must_be_first_application_message() {
+    fn client_auth_messages_are_not_part_of_the_protocol() {
+        assert_eq!(
+            parse_application_message(r#"{"type":"auth","token":"token"}"#).unwrap_err(),
+            "Invalid message"
+        );
         assert!(matches!(
-            parse_application_message(r#"{"type":"auth","token":"token"}"#, false),
-            Ok(ClientMessage::Auth { .. })
+            parse_application_message(r#"{"type":"ping"}"#),
+            Ok(ClientMessage::Ping)
         ));
-        assert_eq!(
-            parse_application_message(r#"{"type":"ping"}"#, false).unwrap_err(),
-            "Authentication must be the first message"
-        );
-        assert_eq!(
-            parse_application_message(r#"{"type":"auth","token":"token"}"#, true).unwrap_err(),
-            "Already authenticated"
-        );
+    }
+
+    #[test]
+    fn auth_token_is_read_from_cookie_headers() {
+        let headers = HeaderMap::from_iter([(
+            axum::http::header::COOKIE,
+            "theme=dark; auth_token=jwt-value; locale=en"
+                .parse()
+                .unwrap(),
+        )]);
+        assert_eq!(token_from_headers(&headers), Some("jwt-value"));
+        assert_eq!(token_from_headers(&HeaderMap::new()), None);
+    }
+
+    #[test]
+    fn token_validation_rejects_invalid_and_expired_tokens() {
+        #[derive(Serialize)]
+        struct Claims {
+            sub: i32,
+            exp: usize,
+        }
+
+        let secret = "test-secret";
+        let valid = encode(
+            &Header::default(),
+            &Claims {
+                sub: 42,
+                exp: (chrono::Utc::now().timestamp() + 60) as usize,
+            },
+            &EncodingKey::from_secret(secret.as_bytes()),
+        )
+        .unwrap();
+        let expired = encode(
+            &Header::default(),
+            &Claims {
+                sub: 42,
+                exp: (chrono::Utc::now().timestamp() - 1) as usize,
+            },
+            &EncodingKey::from_secret(secret.as_bytes()),
+        )
+        .unwrap();
+
+        assert_eq!(user_id_from_token_with_secret(&valid, secret), Some(42));
+        assert_eq!(user_id_from_token_with_secret(&expired, secret), None);
+        assert_eq!(user_id_from_token_with_secret("not-a-token", secret), None);
     }
 
     #[tokio::test]

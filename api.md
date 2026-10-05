@@ -619,24 +619,11 @@ Set-Cookie: auth_token=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0; Expires=Thu,
 **请求体**:
 ```json
 {
-  "id": 1,
-  "title": "string",
-  "content": "修改后的内容",
-  "author": { ForumUser },
-  "category": "general",
-  "tags": ["rust"],
-  "createdAt": "...",
-  "updatedAt": "...",
-  "viewCount": 10,
-  "commentCount": 3,
-  "likeCount": 5,
-  "likedByMe": false,
-  "isPinned": false,
-  "isLocked": false
+  "content": "修改后的内容"
 }
 ```
 
-> 实际仅 `content` 字段会被更新，`updatedAt` 自动设为当前时间。其余字段在请求体中可传但不生效。
+仅接受 `content` 字段，`updatedAt` 自动设为当前时间。
 
 **成功响应** `200`（无响应体）
 
@@ -817,6 +804,26 @@ Set-Cookie: auth_token=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0; Expires=Thu,
 **错误响应**:
 - `401` — 未认证
 - `404` — 好友关系不存在
+
+---
+
+### 8. WebSocket 实时连接
+
+- **端点**: `GET /api/ws`（兼容: `GET /ws`）
+- **认证**: 必需；HTTP 升级请求必须携带登录时下发的 `auth_token` HttpOnly cookie
+- **速率限制**: 无
+
+服务器在升级连接前验证 cookie、JWT 有效期及对应用户是否仍然存在。缺少 cookie、JWT 无效或过期、用户不存在时返回 HTTP `401`，不会升级连接。客户端无需且不应发送认证消息。
+
+连接成功后服务器发送：
+```json
+{
+  "type": "auth_ok",
+  "user_id": 1
+}
+```
+
+客户端可发送 `ping`、`subscribe` 和 `unsubscribe` 消息；服务器保留心跳、在线状态及论坛实时消息推送行为。
 
 ---
 

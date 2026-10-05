@@ -89,6 +89,12 @@ pub struct CreatePostRequest {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpdatePostRequest {
+    pub content: String,
+}
+
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateCommentRequest {
     pub content: String,
@@ -615,7 +621,7 @@ async fn modify_post(
     State(pool): State<Pool<Postgres>>,
     Path(id): Path<i32>,
     headers: HeaderMap,
-    Json(payload): Json<ForumPost>,
+    Json(payload): Json<UpdatePostRequest>,
 ) -> Result<StatusCode, StatusCode> {
     let user = require_current_user(&pool, &headers).await?;
     require_post_moderator(&pool, id, &user).await?;
@@ -1144,7 +1150,19 @@ pub fn forum_routes() -> Router<Pool<Postgres>> {
 
 #[cfg(test)]
 mod tests {
-    use super::message_preview;
+    use super::{UpdatePostRequest, message_preview};
+
+    #[test]
+    fn update_post_payload_contains_only_content() {
+        let payload: UpdatePostRequest = serde_json::from_str(r#"{"content":"updated"}"#).unwrap();
+        assert_eq!(payload.content, "updated");
+        assert!(
+            serde_json::from_str::<UpdatePostRequest>(r#"{"title":"missing content"}"#).is_err()
+        );
+        assert!(
+            serde_json::from_str::<UpdatePostRequest>(r#"{"content":"updated","id":1}"#).is_err()
+        );
+    }
 
     #[test]
     fn message_preview_preserves_up_to_sixty_characters() {
