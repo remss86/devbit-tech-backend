@@ -26,7 +26,7 @@ pub fn build_router(
     start_time: Arc<Instant>,
 ) -> Router {
     let strict_rate_limiter = rate_limit::RateLimiter::new(5, Duration::from_secs(60));
-    let general_rate_limiter = rate_limit::RateLimiter::new(10, Duration::from_secs(60));
+    let general_rate_limiter = rate_limit::RateLimiter::new(60, Duration::from_secs(60));
 
     let auth_routes = account::auth_routes().route_layer(middleware::from_fn_with_state(
         strict_rate_limiter,
