@@ -95,11 +95,17 @@ pub fn account_routes() -> Router<Pool<Postgres>> {
         .route("/me", get(current_user))
         .route("/me/avatar", post(upload_avatar))
         .route("/logout", post(logout))
-        .route("/avatars/{filename}", get(serve_avatar))
         .route("/api/me", get(current_user))
         .route("/api/me/avatar", post(upload_avatar))
-        .route("/api/avatars/{filename}", get(serve_avatar))
         .route("/api/logout", post(logout))
+}
+
+/// Public static assets. These are mounted outside the rate limiter: a page
+/// with many avatars must not consume the API request budget.
+pub fn asset_routes() -> Router<Pool<Postgres>> {
+    Router::new()
+        .route("/avatars/{filename}", get(serve_avatar))
+        .route("/api/avatars/{filename}", get(serve_avatar))
 }
 
 async fn create_user(
@@ -450,7 +456,16 @@ async fn serve_avatar(Path(filename): Path<String>) -> Result<Response, StatusCo
         .map_err(|_| StatusCode::NOT_FOUND)?;
     let mime = mime_guess::from_path(&filename).first_or_octet_stream();
 
-    Ok(([(header::CONTENT_TYPE, mime.as_ref())], data).into_response())
+    // Avatar names are content-addressed UUIDs and never reused, so browsers
+    // can cache them for a year without revalidation.
+    Ok((
+        [
+            (header::CONTENT_TYPE, mime.as_ref()),
+            (header::CACHE_CONTROL, "public, max-age=31536000, immutable"),
+        ],
+        data,
+    )
+        .into_response())
 }
 
 async fn logout(headers: HeaderMap, Extension(ws_state): Extension<ws::WsState>) -> Response {
