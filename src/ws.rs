@@ -92,6 +92,16 @@ impl WsState {
             .is_some_and(|senders| !senders.is_empty())
     }
 
+    /// Snapshot of currently connected accounts. Used only for coarse filters
+    /// such as "online friends"; presence itself is not persisted.
+    pub fn online_user_ids(&self) -> Vec<i32> {
+        self.connections
+            .iter()
+            .filter(|entry| !entry.value().is_empty())
+            .map(|entry| *entry.key())
+            .collect()
+    }
+
     pub fn disconnect_user(&self, user_id: i32) {
         let _transition = self
             .presence_transitions

@@ -126,6 +126,8 @@
   "commentCount": 3,
   "likeCount": 5,
   "likedByMe": false,
+  "repostCount": 2,
+  "repostedByMe": false,
   "isPinned": false,
   "isLocked": false
 }
@@ -137,11 +139,15 @@
 {
   "id": 1,
   "postId": 5,
+  "parentId": 12,
+  "replyTo": { ForumUser },
   "author": { ForumUser },
   "content": "string",
   "createdAt": "2025-01-01T00:00:00+00:00"
 }
 ```
+
+`parentId` 与 `replyTo` 仅在回复中出现。
 
 ### ForumMessage（私信）
 
@@ -381,6 +387,52 @@ Set-Cookie: auth_token=<jwt>; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age
 ```
 Set-Cookie: auth_token=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT
 ```
+
+---
+
+#### 1.8 请求密码重置验证码
+
+- **端点**: `POST /api/v2/account/password-reset/code`
+- **版本**: v2
+- **认证**: 无需
+- **速率限制**: 认证接口
+
+**请求体**:
+```json
+{ "email": "member@example.com" }
+```
+
+无论邮箱是否存在都返回相同受理信息，避免账号枚举：
+
+```json
+{
+  "message": "如果该邮箱可以恢复，验证码将发送到该邮箱。",
+  "expiresInSeconds": 600,
+  "retryAfterSeconds": 60
+}
+```
+
+开发模式且账号存在时额外返回 `developmentCode`。同一邮箱 60 秒内重复请求返回 `429 RATE_LIMITED`。
+
+---
+
+#### 1.9 确认密码重置
+
+- **端点**: `POST /api/v2/account/password-reset/confirm`
+- **版本**: v2
+- **认证**: 无需
+- **速率限制**: 认证接口
+
+**请求体**:
+```json
+{
+  "email": "member@example.com",
+  "code": "123456",
+  "password": "new-password1"
+}
+```
+
+**成功响应**: `204 No Content`。验证码单次有效；错误、过期或已使用时返回 `400 INVALID_CODE`；连续 5 次失败后验证码作废。重置成功后旧密码立即失效。
 
 ---
 
@@ -654,30 +706,41 @@ Set-Cookie: auth_token=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0; E
 - **认证**: 无需
 - **速率限制**: 通用（60 req / 60s）
 
-**成功响应** `200**: `ForumComment[]`（按创建时间升序）
+**成功响应** `200`: `ForumComment[]`（按创建时间升序；每条评论带可选 `parentId` 与 `replyTo`，客户端据此渲染嵌套树）
+
+`ForumComment` 额外字段：
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `parentId` | number? | 父评论 ID；顶层评论省略 |
+| `replyTo` | ForumUser? | 父评论作者，用于显示「回复 @昵称」 |
 
 ---
 
-#### 5.2 发表评论
+#### 5.2 发表评论 / 回复
 
 - **端点**: `POST /api/forum/posts/{id}/comments`
 - **版本**: v1
 - **认证**: 必需
-- **速率限制**: 通用（60 req / 60s）
+- **速率限制**: 通用
 
 **请求体**:
 ```json
 {
-  "content": "评论内容"
+  "content": "评论内容",
+  "parentId": 123
 }
 ```
 
-**成功响应** `200**: `ForumComment`
+`parentId` 可省略表示顶层评论；必须是同一帖子的评论。最多支持 5 层嵌套，超出返回 `400`。
+
+**成功响应** `200`: `ForumComment`（含 `parentId`）
 
 **错误响应**:
+- `400` — 父评论不属于该帖子或嵌套过深
 - `401` — 未认证
 - `403` — 帖子已锁定
-- `404` — 帖子不存在
+- `404` — 帖子或父评论不存在
 
 ---
 
@@ -694,6 +757,28 @@ Set-Cookie: auth_token=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0; E
 - `401` — 未认证
 - `403` — 非作者且非管理员
 - `404` — 评论不存在
+
+---
+
+#### 5.4 转发 / 取消转发帖子
+
+- **端点**: `PUT /api/forum/posts/{id}/repost`
+- **版本**: v1
+- **认证**: 必需
+- **速率限制**: 通用
+
+重复调用切换当前用户的转发状态；不会复制原帖，评论、点赞与转发统计仍属于同一帖子。
+
+**成功响应** `200`: 更新后的 `ForumPost`，其中：
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `repostCount` | number | 转发总数 |
+| `repostedByMe` | boolean | 当前用户是否已转发 |
+
+**错误响应**:
+- `401` — 未认证
+- `404` — 帖子不存在
 
 ---
 
@@ -729,7 +814,10 @@ Set-Cookie: auth_token=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0; E
 
 **错误响应**:
 - `401` — 未认证
+- `403` — 被屏蔽、对方接收偏好不允许，或陌生人已发送过一条且对方尚未回复；后者返回 `MESSAGE_LIMIT_REACHED`
 - `404` — 接收者不存在
+
+> 陌生人限制由服务端持久化：非好友对同一接收者只能发送一条私信，直到对方回复。刷新页面、清除历史或更换客户端都不会重置。推荐的会话接口见 `POST /api/v2/social/conversations/{userId}/messages`。
 
 ---
 

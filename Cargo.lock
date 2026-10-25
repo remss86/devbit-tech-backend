@@ -383,7 +383,7 @@ dependencies = [
 
 [[package]]
 name = "devbit"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "axum",
  "base64",
@@ -2108,6 +2108,7 @@ dependencies = [
  "tokio-stream",
  "tracing",
  "url",
+ "uuid",
 ]
 
 [[package]]
@@ -2188,6 +2189,7 @@ dependencies = [
  "stringprep",
  "thiserror",
  "tracing",
+ "uuid",
  "whoami",
 ]
 
@@ -2226,6 +2228,7 @@ dependencies = [
  "stringprep",
  "thiserror",
  "tracing",
+ "uuid",
  "whoami",
 ]
 
@@ -2252,6 +2255,7 @@ dependencies = [
  "thiserror",
  "tracing",
  "url",
+ "uuid",
 ]
 
 [[package]]
