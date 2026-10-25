@@ -2,13 +2,17 @@
 use crate::auth;
 use axum::{
     Extension,
-    extract::ws::{Message, WebSocket, WebSocketUpgrade},
-    http::HeaderMap,
-    response::IntoResponse,
+    extract::{
+        State,
+        ws::{Message, WebSocket, WebSocketUpgrade},
+    },
+    http::{HeaderMap, StatusCode},
+    response::{IntoResponse, Response},
 };
 use dashmap::DashMap;
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
+use sqlx::{Pool, Postgres};
 use std::{
     sync::{Arc, Mutex},
     time::{Duration, Instant},
@@ -80,6 +84,12 @@ impl WsState {
                 enqueue(&connection.sender, Message::Text(text.clone().into()))
             });
         }
+    }
+
+    pub fn is_online(&self, user_id: i32) -> bool {
+        self.connections
+            .get(&user_id)
+            .is_some_and(|senders| !senders.is_empty())
     }
 
     pub fn disconnect_user(&self, user_id: i32) {
@@ -166,15 +176,37 @@ enum ServerMessage {
 }
 
 ///ws启动函数
+///
+/// A cookie or bearer identity is validated against the database before the
+/// upgrade. A token for a deleted account must not open an authenticated
+/// socket, even though the JWT itself is still cryptographically valid.
 pub async fn ws_handler(
     ws: WebSocketUpgrade,
+    State(pool): State<Pool<Postgres>>,
     Extension(ws_state): Extension<WsState>,
     headers: HeaderMap,
-) -> impl IntoResponse {
+) -> Result<Response, StatusCode> {
     let initial_identity = auth::identity_from_headers(&headers);
-    ws.max_frame_size(MAX_WEBSOCKET_MESSAGE_SIZE)
+    if let Some(identity) = initial_identity {
+        let user_exists =
+            sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM users WHERE id = $1)")
+                .bind(identity.user_id)
+                .fetch_one(&pool)
+                .await
+                .map_err(|error| {
+                    warn!(%error, "failed to validate WebSocket user");
+                    StatusCode::INTERNAL_SERVER_ERROR
+                })?;
+        if !user_exists {
+            return Err(StatusCode::UNAUTHORIZED);
+        }
+    }
+
+    Ok(ws
+        .max_frame_size(MAX_WEBSOCKET_MESSAGE_SIZE)
         .max_message_size(MAX_WEBSOCKET_MESSAGE_SIZE)
         .on_upgrade(move |socket| handle_socket(socket, ws_state, initial_identity))
+        .into_response())
 }
 
 fn enqueue_server_message(sender: &Tx, message: &ServerMessage) {

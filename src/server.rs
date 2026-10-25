@@ -8,7 +8,7 @@
 //! # 装配顺序
 //! `with_state` 必须最后调用，否则 `Extension` 注入的状态无法被 handler 取出。
 
-use crate::{account, forum, rate_limit, ws};
+use crate::{account, forum, rate_limit, social, ws};
 use axum::{
     Extension, Json, Router,
     extract::State,
@@ -45,6 +45,7 @@ pub fn build_router(
 
     let general_routes = account::account_routes()
         .merge(forum::forum_routes())
+        .merge(social::social_routes())
         .route_layer(middleware::from_fn_with_state(
             general_rate_limiter,
             rate_limit::middleware,

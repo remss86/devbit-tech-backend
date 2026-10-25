@@ -5,4 +5,5 @@ pub mod database;
 pub mod forum;
 pub mod rate_limit;
 pub mod server;
+pub mod social;
 pub mod ws;
