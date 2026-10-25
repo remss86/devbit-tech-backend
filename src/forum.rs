@@ -282,7 +282,7 @@ async fn require_comment_moderator(
     }
 }
 
-fn row_to_post(row: &PgRow) -> ForumPost {
+pub(crate) fn row_to_post(row: &PgRow) -> ForumPost {
     let author_id: i32 = row.get("author_id");
     let author_name: String = row.get("author_name");
     let author_avatar_url: Option<String> = row.get("author_avatar_url");

@@ -77,6 +77,10 @@ authenticated viewer. Blocking and receive preferences are also enforced when
 sending a direct message through the existing `/api/forum/messages` endpoint;
 `canMessage` is a UI hint, not an authorization decision.
 
+`GET /api/v2/social/feed` returns posts written by confirmed friends, and
+`GET /api/v2/social/users/{id}/profile` returns a public profile with the
+viewer-relative relationship and up to five recent post titles.
+
 Paged endpoints return `{ "items": [...], "nextCursor": "..." }` with at most
 50 items (20 by default). Cursors are opaque and bound to the query that
 produced them.

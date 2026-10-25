@@ -42,6 +42,11 @@ pub fn social_routes() -> Router<Pool<Postgres>> {
 fn v2_routes() -> Router<Pool<Postgres>> {
     Router::new()
         .route("/v2/social/users", get(relationships::search_users))
+        .route(
+            "/v2/social/users/{user_id}/profile",
+            get(relationships::get_profile),
+        )
+        .route("/v2/social/feed", get(relationships::friend_feed))
         .route("/v2/social/friends", get(relationships::list_friends))
         .route(
             "/v2/social/friends/{user_id}",

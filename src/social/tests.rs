@@ -99,6 +99,7 @@ async fn friend_request_flow_creates_a_symmetric_friendship() {
     let pool = setup().await;
     create_user(&pool, 1, "Alice").await;
     create_user(&pool, 2, "Bob").await;
+    create_user(&pool, 3, "Carol").await;
     let app = app(pool);
 
     let (status, created) = request(
@@ -151,8 +152,48 @@ async fn friend_request_flow_creates_a_symmetric_friendship() {
     assert_eq!(friends["items"].as_array().unwrap().len(), 1);
     assert_eq!(friends["items"][0]["user"]["name"], "Bob");
 
+    let (status, bob_post) = request(
+        &app,
+        "POST",
+        "/api/forum/posts",
+        2,
+        Some(json!({"title": "Bob's post", "content": "hello from Bob"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{bob_post}");
+    let bob_post_id = bob_post["id"].as_i64().unwrap();
+
+    let (status, _) = request(
+        &app,
+        "POST",
+        "/api/forum/posts",
+        3,
+        Some(json!({"title": "Carol's post", "content": "not a friend"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, feed) = request(&app, "GET", "/api/v2/social/feed", 1, None).await;
+    assert_eq!(status, StatusCode::OK, "{feed}");
+    assert_eq!(feed["items"].as_array().unwrap().len(), 1);
+    assert_eq!(feed["items"][0]["title"], "Bob's post");
+
+    let (status, profile) = request(&app, "GET", "/api/v2/social/users/2/profile", 1, None).await;
+    assert_eq!(status, StatusCode::OK, "{profile}");
+    assert_eq!(profile["relationship"], "friends");
+    assert_eq!(profile["recentPosts"][0]["id"], bob_post_id);
+
+    let (status, self_profile) =
+        request(&app, "GET", "/api/v2/social/users/1/profile", 1, None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(self_profile["relationship"], "self");
+    assert_eq!(self_profile["canMessage"], false);
+
     let (status, _) = request(&app, "DELETE", "/api/v2/social/friends/2", 1, None).await;
     assert_eq!(status, StatusCode::NO_CONTENT);
+
+    let (_, feed) = request(&app, "GET", "/api/v2/social/feed", 1, None).await;
+    assert_eq!(feed["items"].as_array().unwrap().len(), 0);
 
     let (_, friends) = request(&app, "GET", "/api/v2/social/friends", 2, None).await;
     assert_eq!(friends["items"].as_array().unwrap().len(), 0);
@@ -235,6 +276,7 @@ async fn blocking_keeps_the_friendship_but_disables_messaging() {
 
     let (_, friends) = request(&app, "GET", "/api/v2/social/friends", 1, None).await;
     assert_eq!(friends["items"].as_array().unwrap().len(), 1);
+    assert_eq!(friends["items"][0]["user"]["relationship"], "blocked");
     assert_eq!(friends["items"][0]["user"]["canMessage"], false);
 
     let (status, _) = request(
@@ -247,11 +289,28 @@ async fn blocking_keeps_the_friendship_but_disables_messaging() {
     .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
 
+    let (status, _) = request(
+        &app,
+        "POST",
+        "/api/forum/posts",
+        2,
+        Some(json!({"title": "Hidden while blocked", "content": "not in the feed"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (_, feed) = request(&app, "GET", "/api/v2/social/feed", 1, None).await;
+    assert_eq!(feed["items"].as_array().unwrap().len(), 0);
+
     let (status, _) = request(&app, "DELETE", "/api/v2/social/blocks/2", 1, None).await;
     assert_eq!(status, StatusCode::NO_CONTENT);
 
     let (_, friends) = request(&app, "GET", "/api/v2/social/friends", 1, None).await;
+    assert_eq!(friends["items"][0]["user"]["relationship"], "friends");
     assert_eq!(friends["items"][0]["user"]["canMessage"], true);
+
+    let (_, feed) = request(&app, "GET", "/api/v2/social/feed", 1, None).await;
+    assert_eq!(feed["items"].as_array().unwrap().len(), 1);
 }
 
 #[tokio::test]

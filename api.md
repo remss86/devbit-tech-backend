@@ -827,6 +827,8 @@ Social V2 的详细契约、字段与实现状态见 [SOCIAL-API-V2.md](./SOCIAL
 | 方法与路径 | 说明 |
 |---|---|
 | `GET /users?q=&cursor=&limit=` | 搜索用户，返回关系、`requestId`、`canMessage` |
+| `GET /users/{userId}/profile` | 公开资料、关系、`canMessage` 与最近 5 篇帖子 |
+| `GET /feed?cursor=&limit=` | 已确认好友的帖子动态流 |
 | `GET /friends?cursor=&limit=` | 双方确认的好友，按建立时间倒序 |
 | `GET /friend-requests?direction=incoming\|outgoing&status=pending&cursor=` | 好友申请列表 |
 | `POST /friend-requests` | 发送申请；重复发送返回已有 pending 申请 |
