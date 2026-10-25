@@ -33,13 +33,27 @@
 
 ### 速率限制
 
-| 端点类型     | 限制         | 说明                  |
-|-------------|-------------|----------------------|
-| 认证相关端点  | 5 req / 60s | 注册、登录、发送验证码    |
-| 通用端点     | 60 req / 60s | 其他所有 API           |
+| 端点类型     | 默认限制         | 计数维度 | 说明 |
+|-------------|-----------------|---------|------|
+| 认证相关端点  | 20 req / 60s | 客户端 IP | 注册、登录、发送验证码 |
+| 通用读请求   | 600 req / 60s | 登录用户；匿名时按 IP | GET/HEAD/OPTIONS |
+| 通用写请求   | 120 req / 60s | 登录用户；匿名时按 IP | POST/PUT/PATCH/DELETE |
 
-- 超出限制返回 `429 Too Many Requests`，响应头 `Retry-After: 60`。
-- 限制基于客户端 IP 的滑动时间窗口。
+- 超出限制返回 `429 Too Many Requests`，响应头包含 `Retry-After`、`X-RateLimit-Limit`、`X-RateLimit-Remaining`、`X-RateLimit-Reset`。
+- 响应体使用统一错误信封：
+
+```json
+{
+  "error": {
+    "code": "RATE_LIMITED",
+    "message": "操作过于频繁，请稍后再试。",
+    "retryAfterSeconds": 42
+  }
+}
+```
+
+- 阈值可通过 `RATE_LIMIT_AUTH_PER_MINUTE`、`RATE_LIMIT_READ_PER_MINUTE`、`RATE_LIMIT_WRITE_PER_MINUTE` 调整。
+- 头像、健康检查和 WebSocket 升级不计入限流；头像响应带一年 `immutable` 缓存。
 
 ### 错误响应格式
 
@@ -861,6 +875,9 @@ Social V2 的详细契约、字段与实现状态见 [SOCIAL-API-V2.md](./SOCIAL
 | `SMTP_PASSWORD` | 条件必需        | SMTP 邮箱密码/授权码         | —                                           |
 | `SMTP_SERVER`   | 否             | SMTP 服务器地址              | `smtp.qq.com`                               |
 | `SMTP_PORT`     | 否             | SMTP 服务器端口              | `465`                                       |
+| `RATE_LIMIT_AUTH_PER_MINUTE` | 否 | 认证接口每 IP 每分钟请求数 | `20` |
+| `RATE_LIMIT_READ_PER_MINUTE` | 否 | 通用读接口每用户/IP 每分钟请求数 | `600` |
+| `RATE_LIMIT_WRITE_PER_MINUTE` | 否 | 通用写接口每用户/IP 每分钟请求数 | `120` |
 
 ### B. 密码安全
 
