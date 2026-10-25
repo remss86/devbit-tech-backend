@@ -59,7 +59,7 @@ impl RateLimiter {
         {
             entries.pop_front();
         }
-        
+
         if entries.len() >= self.max_requests {
             //返回仍需要等待多久
             return Err(self

@@ -62,7 +62,7 @@ impl WsState {
             .remove_if(&user_id, |_, senders| senders.is_empty())
             .is_some()
     }
-    
+
     //发私信的函数
     pub fn send_to_user(&self, user_id: i32, json: &str) {
         if let Some(ref mut senders) = self.connections.get_mut(&user_id) {
