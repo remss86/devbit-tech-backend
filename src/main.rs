@@ -7,8 +7,10 @@ use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
+    // 读取.env，注入环境变量，注入当前进程的环境变量，每个进程都有自己独立的一份环境变量
     dotenv().ok();
     let config = AppConfig::from_env()?;
+    // 保证存活
     let _log_guard = init_tracing(config.is_production);
 
     info!("Starting DevBit backend");

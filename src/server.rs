@@ -1,3 +1,13 @@
+//! 路由装配模块。
+//!
+//! 负责把认证、业务、基础设施三类路由合并，并统一挂载：
+//! - 限流（认证接口严格、业务接口宽松）
+//! - 访问日志（按状态码分级）
+//! - 安全响应头（HSTS / X-Frame-Options / nosniff）
+//!
+//! # 装配顺序
+//! `with_state` 必须最后调用，否则 `Extension` 注入的状态无法被 handler 取出。
+
 use crate::{account, forum, rate_limit, ws};
 use axum::{
     Extension, Json, Router,
@@ -137,6 +147,7 @@ async fn security_headers_middleware(
         header::X_CONTENT_TYPE_OPTIONS,
         HeaderValue::from_static("nosniff"),
     );
+    //不允许内嵌网页
     headers.insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
     headers.insert(
         header::STRICT_TRANSPORT_SECURITY,

@@ -147,6 +147,7 @@ pub struct FriendInfo {
     pub created_at: String,
 }
 
+///初始化未定义头像
 fn avatar_for_user(id: i32, name: &str) -> String {
     match id {
         1 => return "CD".to_string(),
@@ -336,6 +337,7 @@ async fn fetch_users(pool: &Pool<Postgres>) -> Result<Vec<ForumUser>, StatusCode
         .collect())
 }
 
+///TODO:LEFT JOIN
 async fn fetch_comments(pool: &Pool<Postgres>) -> Result<Vec<ForumComment>, StatusCode> {
     let rows = sqlx::query(
         "SELECT c.*, u.name as author_name, u.avatar_url as author_avatar_url
@@ -350,6 +352,7 @@ async fn fetch_comments(pool: &Pool<Postgres>) -> Result<Vec<ForumComment>, Stat
     Ok(rows.iter().map(row_to_comment).collect())
 }
 
+///SQL学习语句
 async fn fetch_post_by_id(
     pool: &Pool<Postgres>,
     id: i32,
@@ -378,6 +381,7 @@ async fn fetch_post_by_id(
         .ok_or(StatusCode::NOT_FOUND)
 }
 
+///TODO:分页
 async fn fetch_messages_for_user(
     pool: &Pool<Postgres>,
     user_id: i32,
@@ -400,6 +404,7 @@ async fn fetch_messages_for_user(
     Ok(rows.iter().map(row_to_message).collect())
 }
 
+///TODO:性能隐患,分页问题
 async fn bootstrap(
     State(pool): State<Pool<Postgres>>,
     headers: HeaderMap,
@@ -421,6 +426,7 @@ async fn bootstrap(
     }))
 }
 
+///为了用Json包装，又不想改原函数
 async fn list_users(
     State(pool): State<Pool<Postgres>>,
 ) -> Result<Json<Vec<ForumUser>>, StatusCode> {
@@ -474,6 +480,7 @@ async fn fetch_posts(
     Ok(rows.iter().map(row_to_post).collect())
 }
 
+///不知道何时访问
 async fn list_posts(
     State(pool): State<Pool<Postgres>>,
     Query(q): Query<PostsQuery>,
@@ -653,7 +660,7 @@ async fn toggle_lock(
         .execute(&pool)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
+//Q:到底线程的访问情况是如何的
     if result.rows_affected() == 0 {
         return Err(StatusCode::NOT_FOUND);
     }
@@ -661,12 +668,14 @@ async fn toggle_lock(
     Ok(Json(fetch_post_by_id(&pool, id, None).await?))
 }
 
+///TODO:给帖子加点赞数字段
 async fn toggle_like(
     State(pool): State<Pool<Postgres>>,
     Path(id): Path<i32>,
     headers: HeaderMap,
 ) -> Result<Json<ForumPost>, StatusCode> {
     let user_id = require_user_id(&headers)?;
+    //Q:处理拉黑？
     let _ = get_current_user(&pool, user_id).await?;
 
     let post_exists: bool =
@@ -714,6 +723,7 @@ async fn toggle_like(
     Ok(Json(fetch_post_by_id(&pool, id, Some(user_id)).await?))
 }
 
+///TODO:分页,嵌套回复
 async fn list_comments(
     State(pool): State<Pool<Postgres>>,
     Path(post_id): Path<i32>,
@@ -769,7 +779,7 @@ async fn create_comment(
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let created_at: DateTime<Utc> = row.get("created_at");
-
+    //创建帖子也要返回，因为创建完要立刻显示
     Ok(Json(ForumComment {
         id: row.get("id"),
         post_id,
@@ -810,6 +820,7 @@ async fn list_messages(
 
 async fn send_message(
     State(pool): State<Pool<Postgres>>,
+    //不用Extension包装可能axum识别不出来，无法嵌入
     Extension(ws_state): Extension<crate::ws::WsState>,
     headers: HeaderMap,
     Json(payload): Json<SendMessageRequest>,
@@ -854,6 +865,7 @@ async fn send_message(
     Ok(Json(message))
 }
 
+///Q:实际上显示的没有那么多
 fn message_preview(content: &str) -> String {
     let mut chars = content.chars();
     let first_sixty: String = chars.by_ref().take(60).collect();
@@ -911,6 +923,8 @@ async fn mark_conversation_read(
     }
 }
 
+/// Q:搜索好像不是后端实现的，因为刚开始就一次性读取了全部帖子返回了
+/// 感觉返回信息冗余了
 async fn search_posts(
     State(pool): State<Pool<Postgres>>,
     Query(q): Query<SearchQuery>,
@@ -980,6 +994,7 @@ async fn list_friends(
     ))
 }
 
+///TODO:双向加好友
 async fn add_friend(
     State(pool): State<Pool<Postgres>>,
     headers: HeaderMap,
@@ -1035,8 +1050,10 @@ async fn remove_friend(
     }
 }
 
+///TODO:UID唯一搜索
 async fn search_users(
     State(pool): State<Pool<Postgres>>,
+    //提取URL的?内容，类似PATH
     Query(q): Query<SearchQuery>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<ForumUser>>, StatusCode> {
@@ -1086,6 +1103,7 @@ pub fn forum_routes() -> Router<Pool<Postgres>> {
             get(list_comments).post(create_comment),
         )
         .route("/api/forum/comments/{id}", delete(delete_comment))
+        //rest风格
         .route("/api/forum/messages", get(list_messages).post(send_message))
         .route("/api/forum/messages/{id}/read", put(mark_message_read))
         .route(

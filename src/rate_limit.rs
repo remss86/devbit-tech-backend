@@ -1,3 +1,4 @@
+//!TODO:分布式滑动窗口限流
 use axum::{
     Json,
     extract::{ConnectInfo, Request, State},
@@ -58,8 +59,9 @@ impl RateLimiter {
         {
             entries.pop_front();
         }
-
+        
         if entries.len() >= self.max_requests {
+            //返回仍需要等待多久
             return Err(self
                 .window
                 .saturating_sub(now.saturating_duration_since(entries[0])));
@@ -82,7 +84,9 @@ fn retry_after_seconds(duration: Duration) -> u64 {
         .max(1)
 }
 
+///Q?
 fn client_ip(peer_ip: IpAddr, headers: &HeaderMap) -> IpAddr {
+    //必须经过nginx转发!!!
     if !peer_ip.is_loopback() {
         return peer_ip;
     }

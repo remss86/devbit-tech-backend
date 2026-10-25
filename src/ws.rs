@@ -1,3 +1,4 @@
+//! WebSocket 能让页面内容实时变化，但通常是局部更新，不是整页刷新。
 use crate::auth;
 use axum::{
     Extension,
@@ -44,6 +45,7 @@ impl WsState {
         }
     }
 
+    ///注册一个连接并且判断是不是第一个连接，如果是，则通知上线，因为一个用户可以多开一个网站
     fn register(&self, user_id: i32, sender: Tx, disconnect: DisconnectTx) -> bool {
         let mut senders = self.connections.entry(user_id).or_default();
         let was_offline = senders.is_empty();
@@ -60,7 +62,8 @@ impl WsState {
             .remove_if(&user_id, |_, senders| senders.is_empty())
             .is_some()
     }
-
+    
+    //发私信的函数
     pub fn send_to_user(&self, user_id: i32, json: &str) {
         if let Some(ref mut senders) = self.connections.get_mut(&user_id) {
             let text = json.to_string();
@@ -131,6 +134,7 @@ fn parse_application_message(
         if authenticated {
             "Invalid message"
         } else {
+            //错误信息语义不清晰
             "Authentication must be the first message"
         }
     })?;
@@ -161,6 +165,7 @@ enum ServerMessage {
     Subscribed { channel: String },
 }
 
+///ws启动函数
 pub async fn ws_handler(
     ws: WebSocketUpgrade,
     Extension(ws_state): Extension<WsState>,
@@ -220,7 +225,9 @@ async fn handle_socket(
     ws_state: WsState,
     initial_identity: Option<auth::AuthIdentity>,
 ) {
+    //不是管道两端的关系
     let (mut websocket_sender, mut websocket_receiver) = socket.split();
+    //中转站
     let (sender, mut outbound_messages) = mpsc::channel::<Message>(OUTBOUND_QUEUE_CAPACITY);
     let (disconnect, mut disconnect_receiver) = watch::channel(false);
 
@@ -273,11 +280,13 @@ async fn handle_socket(
                 break;
             }
             changed = disconnect_receiver.changed() => {
+                //用户那里的disconnect字段是发送端，给我们发送离线消息
                 if changed.is_ok() && *disconnect_receiver.borrow() {
                     debug!(?user_id, "WebSocket disconnected by server");
                 }
                 break;
             }
+            //这里incoming不是Next类型因为要等Future跑完返回类型
             incoming = websocket_receiver.next() => {
                 match incoming {
                     Some(Ok(Message::Text(text))) => {
@@ -285,6 +294,7 @@ async fn handle_socket(
                             accepts_compatible_auth_message = false;
                             if let Some(identity) = compatible_redundant_identity(&text, user_id) {
                                 token_expiry.as_mut().reset(
+                                    //Q:为什么要加tokio::time::Instant::now()
                                     tokio::time::Instant::now()
                                         + auth::remaining_token_lifetime(identity),
                                 );

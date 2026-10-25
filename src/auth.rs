@@ -1,3 +1,4 @@
+//!cookie,env,password
 use axum::http::{HeaderMap, header};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{Duration, Utc};
@@ -56,6 +57,7 @@ pub fn user_id_from_token(token: &str) -> Option<i32> {
     identity_from_token(token).map(|identity| identity.user_id)
 }
 
+///解码验证token，暂时无刷新token逻辑。
 pub fn identity_from_token(token: &str) -> Option<AuthIdentity> {
     decode::<Claims>(
         token,
@@ -69,6 +71,7 @@ pub fn identity_from_token(token: &str) -> Option<AuthIdentity> {
     })
 }
 
+///"双通道兼容"写法：API 客户端走 header，浏览器页面走 cookie。
 pub fn token_from_headers(headers: &HeaderMap) -> Option<String> {
     if let Some(token) = headers
         .get(header::AUTHORIZATION)
@@ -119,7 +122,7 @@ pub fn expired_auth_cookie() -> String {
 }
 
 pub fn is_admin_user(user_id: i32) -> bool {
-    user_id == 1 || user_id == 2
+    user_id == 1 || user_id == 2 || user_id == 3
 }
 
 pub fn is_production_environment(environment: Option<&str>) -> bool {

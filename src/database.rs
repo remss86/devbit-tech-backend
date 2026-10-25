@@ -1,3 +1,4 @@
+//!db配置，Q:Box::Pin
 use sqlx::{Pool, Postgres, migrate::Migrator, postgres::PgPoolOptions};
 use std::{env, time::Duration};
 use tokio::time::timeout;

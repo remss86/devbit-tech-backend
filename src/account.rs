@@ -1,3 +1,4 @@
+//!登录，注册，头像，获取登录凭证模块
 use crate::{auth, ws};
 use axum::{
     Extension, Json, Router,
@@ -207,7 +208,7 @@ async fn login_check(
             .await
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     }
-
+    //登陆的时候把token给用户，往后需要用户信息的请求用户便可携带此信息访问。
     let token = auth::generate_token(user_id, &user_email)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
@@ -354,16 +355,18 @@ async fn upload_avatar(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let mut field_found = false;
+    //while let 是“只要模式匹配成功就继续循环”的语法糖
     while let Ok(Some(mut field)) = multipart.next_field().await {
         if field.name().unwrap_or("") != "avatar" {
             continue;
         }
 
         let file_name = field.file_name().unwrap_or("").to_string();
+        //很难想象一个人怎么传递空文件过来的
         if file_name.is_empty() {
             return Err(StatusCode::BAD_REQUEST);
         }
-
+        //WINDOWS允许大写后缀
         let extension = file_name.rsplit('.').next().unwrap_or("").to_lowercase();
         if !ALLOWED_AVATAR_EXTS.contains(&extension.as_str()) {
             return Err(StatusCode::UNSUPPORTED_MEDIA_TYPE);
@@ -436,6 +439,7 @@ async fn upload_avatar(
     }))
 }
 
+///暂时不知道前端什么时候请求这个函数
 async fn serve_avatar(Path(filename): Path<String>) -> Result<Response, StatusCode> {
     if filename.contains('/') || filename.contains('\\') || filename.contains("..") {
         return Err(StatusCode::NOT_FOUND);
@@ -453,7 +457,7 @@ async fn logout(headers: HeaderMap, Extension(ws_state): Extension<ws::WsState>)
     if let Some(user_id) = auth::user_id_from_headers(&headers) {
         ws_state.disconnect_user(user_id);
     }
-
+    //通过响应头通知浏览器删除cookie
     (
         [(header::SET_COOKIE, auth::expired_auth_cookie())],
         Json(LogoutResponse { success: true }),
