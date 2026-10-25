@@ -99,6 +99,30 @@ WebSocket clients can authenticate in either of two compatible ways:
 
 Multiple tabs share one presence transition: only the first connection broadcasts `user_online`, and `user_offline` is broadcast after the final connection closes.
 
+## Registration and administrator security
+
+Registration is safe to expose only after the deployment checklist in
+[SECURITY-AUDIT.md](./SECURITY-AUDIT.md) is complete.
+
+- Passwords must be at least 8 characters and contain at least one letter and
+  one digit; the maximum is 1,024 bytes. Passwords are stored with
+  PBKDF2-HMAC-SHA256 (600,000 iterations) and older hashes are upgraded at login.
+- Names are limited to 50 characters, email addresses to 254 characters.
+- Verification codes are six digits, valid for 10 minutes, allow five failed
+  attempts, and can be resent once per 60 seconds per mailbox.
+- Administrator rights come from `users.is_admin`, never from a hardcoded user
+  ID. The migration does **not** promote anyone automatically. After auditing
+  existing accounts, grant access explicitly and restart:
+
+```sql
+UPDATE users SET is_admin = TRUE WHERE id IN (...);
+```
+
+Before opening registration, rotate the SMTP authorization code (an old code is
+present in public git history), set a production `JWT_SECRET`, serve the API
+over HTTPS, and configure the reverse-proxy client headers below. Consider a
+CAPTCHA or proof-of-work if registration abuse appears.
+
 ## Reverse proxy and rate limiting
 
 The service trusts `X-Real-IP` and then `X-Forwarded-For` only when the TCP peer is a loopback address, which matches the repository's local Nginx deployment. Forwarding headers from direct non-loopback clients are ignored.

@@ -8,14 +8,18 @@ use jsonwebtoken::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
-use std::env;
+use std::{
+    collections::HashSet,
+    env,
+    sync::{OnceLock, RwLock},
+};
 
 type HmacSha256 = Hmac<Sha256>;
 
 pub const AUTH_COOKIE_NAME: &str = "auth_token";
 pub const DEFAULT_JWT_SECRET: &str = "devbit-local-secret";
 const PASSWORD_HASH_PREFIX: &str = "pbkdf2-sha256";
-const PASSWORD_HASH_ITERATIONS: u32 = 100_000;
+const PASSWORD_HASH_ITERATIONS: u32 = 600_000;
 const MAX_PASSWORD_HASH_ITERATIONS: u32 = 1_000_000;
 pub const MAX_PASSWORD_BYTES: usize = 1_024;
 const PASSWORD_SALT_BYTES: usize = 16;
@@ -121,8 +125,28 @@ pub fn expired_auth_cookie() -> String {
     )
 }
 
+/// Administrator IDs loaded from `users.is_admin` at process startup.
+///
+/// Keeping this in a read-mostly set avoids adding a database query to every
+/// `ForumUser` mapping. Granting or revoking administrator rights therefore
+/// requires a restart, which is acceptable because there is no admin-management
+/// endpoint yet.
+static ADMIN_IDS: OnceLock<RwLock<HashSet<i32>>> = OnceLock::new();
+
+pub fn set_admin_ids(ids: impl IntoIterator<Item = i32>) {
+    let ids: HashSet<i32> = ids.into_iter().collect();
+    let lock = ADMIN_IDS.get_or_init(|| RwLock::new(HashSet::new()));
+    *lock
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = ids;
+}
+
 pub fn is_admin_user(user_id: i32) -> bool {
-    user_id == 1 || user_id == 2 || user_id == 3
+    ADMIN_IDS.get().is_some_and(|lock| {
+        lock.read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .contains(&user_id)
+    })
 }
 
 pub fn is_production_environment(environment: Option<&str>) -> bool {
@@ -209,7 +233,15 @@ pub fn verify_password(password: &str, stored_hash: &str) -> bool {
 }
 
 pub fn password_needs_upgrade(stored_hash: &str) -> bool {
-    !stored_hash.starts_with(PASSWORD_HASH_PREFIX)
+    let parts: Vec<&str> = stored_hash.split('$').collect();
+    if parts.first() != Some(&PASSWORD_HASH_PREFIX) || parts.len() != 4 {
+        return true;
+    }
+
+    parts[1]
+        .parse::<u32>()
+        .map(|iterations| iterations < PASSWORD_HASH_ITERATIONS)
+        .unwrap_or(true)
 }
 
 fn jwt_secret() -> String {
@@ -259,6 +291,27 @@ fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn admin_rights_come_from_explicitly_loaded_ids() {
+        set_admin_ids([7, 9]);
+        assert!(is_admin_user(7));
+        assert!(!is_admin_user(1));
+        set_admin_ids([]);
+        assert!(!is_admin_user(7));
+    }
+
+    #[test]
+    fn legacy_iteration_counts_need_a_password_upgrade() {
+        let salt = URL_SAFE_NO_PAD.encode([0_u8; PASSWORD_SALT_BYTES]);
+        let digest = URL_SAFE_NO_PAD.encode([0_u8; PASSWORD_HASH_BYTES]);
+        assert!(password_needs_upgrade(&format!(
+            "{PASSWORD_HASH_PREFIX}$100000${salt}${digest}"
+        )));
+        assert!(!password_needs_upgrade(&format!(
+            "{PASSWORD_HASH_PREFIX}${PASSWORD_HASH_ITERATIONS}${salt}${digest}"
+        )));
+    }
 
     #[test]
     fn passwords_round_trip_and_reject_wrong_values() {

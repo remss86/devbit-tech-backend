@@ -1,7 +1,7 @@
-use devbit::{config::AppConfig, database, server, ws};
+use devbit::{auth, config::AppConfig, database, server, ws};
 use dotenv::dotenv;
 use std::{error::Error, sync::Arc, time::Instant};
-use tracing::info;
+use tracing::{info, warn};
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::EnvFilter;
 
@@ -15,6 +15,20 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     info!("Starting DevBit backend");
     let pool = database::db_init().await?;
+
+    let admin_ids: Vec<i32> = sqlx::query_scalar("SELECT id FROM users WHERE is_admin = TRUE")
+        .fetch_all(&pool)
+        .await?;
+    if admin_ids.is_empty() {
+        warn!("No administrator accounts are configured; grant access via users.is_admin");
+    } else {
+        info!(
+            admin_count = admin_ids.len(),
+            "Administrator accounts loaded"
+        );
+    }
+    auth::set_admin_ids(admin_ids);
+
     let websocket_state = ws::WsState::new();
     let app = server::build_router(pool, websocket_state, Arc::new(Instant::now()));
 
