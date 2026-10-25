@@ -35,6 +35,9 @@ The service applies the versioned SQLx migrations in `migrations/` at startup. M
 | `SMTP_PASSWORD` | unset | SMTP password or application token; required with `SMTP_USERNAME`. |
 | `SMTP_SERVER` | `smtp.qq.com` | SMTP relay host. |
 | `SMTP_PORT` | `465` | SMTP relay port. |
+| `RATE_LIMIT_AUTH_PER_MINUTE` | `20` | Login/register/code requests per client IP per minute. |
+| `RATE_LIMIT_READ_PER_MINUTE` | `600` | GET/HEAD/OPTIONS requests per signed-in user (or IP when anonymous). |
+| `RATE_LIMIT_WRITE_PER_MINUTE` | `120` | POST/PUT/PATCH/DELETE requests per signed-in user (or IP when anonymous). |
 | `RUST_LOG` | `info` | Tracing filter. |
 
 Generate a deployment secret with a secure random source. For example:
@@ -57,7 +60,7 @@ src/
   account.rs     registration, login, current user, and avatars
   auth.rs        JWT, cookies, administrator mapping, and password hashing
   forum.rs       forum, messages, and legacy friends
-  social.rs      Social V2 friends, requests, blocks, preferences, presence
+  social/        Social V2 friends, requests, blocks, preferences, feed, profiles
   ws.rs          authenticated WebSocket connections and presence
   rate_limit.rs  trusted-proxy-aware sliding-window rate limiting
   database.rs    PostgreSQL pool and SQLx migration runner
@@ -107,7 +110,16 @@ proxy_set_header X-Real-IP $remote_addr;
 proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
 ```
 
-Authentication endpoints are limited to 5 requests per 60 seconds per client IP. Other REST endpoints are limited to 60 requests per 60 seconds. Health and WebSocket upgrade routes are not rate limited.
+Rate limits use a 60-second sliding window and can be tuned with the
+`RATE_LIMIT_*_PER_MINUTE` variables above. Authentication endpoints are limited
+per client IP; authenticated business requests are limited per user, so several
+people behind one NAT/proxy do not share a single quota. Read and write methods
+have independent budgets, and responses include `X-RateLimit-Limit`,
+`X-RateLimit-Remaining`, `X-RateLimit-Reset` and (on `429`) `Retry-After`.
+
+Avatar files, health checks and WebSocket upgrades are outside the limiter.
+Avatars are served with `Cache-Control: public, max-age=31536000, immutable`
+because their UUID filenames are never reused.
 
 ## Quality checks
 
