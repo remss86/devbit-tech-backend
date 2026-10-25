@@ -1014,6 +1014,9 @@ async fn list_messages(
     Ok(Json(fetch_messages_for_user(&pool, user.id).await?))
 }
 
+// Axum responses are inherently larger than the success payload; boxing every
+// error in this handler would add noise without a measurable benefit.
+#[allow(clippy::result_large_err)]
 async fn send_message(
     State(pool): State<Pool<Postgres>>,
     //不用Extension包装可能axum识别不出来，无法嵌入
