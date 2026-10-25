@@ -6,4 +6,6 @@ pub mod forum;
 pub mod rate_limit;
 pub mod server;
 pub mod social;
+#[cfg(test)]
+pub mod test_support;
 pub mod ws;

@@ -6,15 +6,14 @@
 //! creating/dropping databases at runtime.
 
 use super::*;
+use crate::test_support::{TEST_LOCK, setup};
 use axum::Extension;
 use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
-use sqlx::{PgPool, postgres::PgPoolOptions};
+use sqlx::PgPool;
 use tower::ServiceExt;
-
-static TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 fn app(pool: PgPool) -> Router {
     crate::forum::forum_routes()
@@ -25,26 +24,6 @@ fn app(pool: PgPool) -> Router {
 
 fn token(user_id: i32) -> String {
     auth::generate_token(user_id, "test@example.com").unwrap()
-}
-
-async fn setup() -> PgPool {
-    let url = std::env::var("DATABASE_URL").expect(
-        "DATABASE_URL must point to a disposable PostgreSQL database for integration tests",
-    );
-    let pool = PgPoolOptions::new()
-        .max_connections(5)
-        .connect(&url)
-        .await
-        .expect("connect to DATABASE_URL");
-    sqlx::migrate!("./migrations")
-        .run(&pool)
-        .await
-        .expect("apply migrations");
-    sqlx::query("TRUNCATE TABLE users, verify_code RESTART IDENTITY CASCADE")
-        .execute(&pool)
-        .await
-        .expect("reset test data");
-    pool
 }
 
 async fn request(
