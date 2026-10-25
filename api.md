@@ -167,16 +167,6 @@
 }
 ```
 
-### FriendInfo（好友信息）
-
-```json
-{
-  "user": { ForumUser },
-  "createdAt": "2025-01-01T00:00:00+00:00"
-}
-```
-
-
 ---
 
 ## API 端点
@@ -775,56 +765,11 @@ Set-Cookie: auth_token=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0; E
 
 ---
 
-### 7. 论坛 - 好友
+### 7. 旧版单向好友（已移除）
 
-#### 7.1 获取好友列表
+旧版 `/api/forum/friends` 接口和 `friends` 表已在 0.5.0 删除，不再提供单向联系人语义。相关请求返回 `404`，请使用 `/api/v2/social` 的双向好友与好友申请接口。
 
-- **端点**: `GET /api/forum/friends`
-- **版本**: v1
-- **认证**: 必需
-- **速率限制**: 通用（60 req / 60s）
-
-**成功响应** `200**: `FriendInfo[]`（按好友名字母序排列）
-
----
-
-#### 7.2 添加好友
-
-- **端点**: `POST /api/forum/friends`
-- **版本**: v1
-- **认证**: 必需
-- **速率限制**: 通用（60 req / 60s）
-
-**请求体**:
-```json
-{
-  "friendId": 3
-}
-```
-
-**成功响应** `200**: `FriendInfo`
-
-**错误响应**:
-- `400` — 尝试添加自己为好友
-- `401` — 未认证
-- `404` — 目标用户不存在
-
-> 好友关系为单向（A 添加 B 为好友，不代表 B 添加 A）。重复添加会更新 `createdAt`。
-
----
-
-#### 7.3 删除好友
-
-- **端点**: `DELETE /api/forum/friends/{friendId}`
-- **版本**: v1
-- **认证**: 必需
-- **速率限制**: 通用（60 req / 60s）
-
-**成功响应**: `204 No Content`
-
-**错误响应**:
-- `401` — 未认证
-- `404` — 好友关系不存在
+迁移 `202610250004_remove_legacy_friends.sql` 会先把旧数据归档到 `friends_legacy_archive`，再删除 `friends` 表。部署前仍建议执行 `pg_dump -t friends`；确认新版本运行正常后，可手动删除归档表。
 
 ---
 
@@ -902,7 +847,7 @@ Social V2 的详细契约、字段与实现状态见 [SOCIAL-API-V2.md](./SOCIAL
 | `forum_comments`    | 帖子评论  |
 | `forum_messages`    | 私信      |
 | `forum_post_likes`  | 帖子点赞  |
-| `friends`           | 旧版单向联系人 |
+| `friends_legacy_archive` | 0.5.0 删除单向好友表前保留的归档，确认后可手动删除 |
 | `social_friend_requests` | Social V2 好友申请 |
 | `social_friendships` | Social V2 双向好友（规范化为 `user_low < user_high`） |
 | `social_blocks` | 用户屏蔽关系 |
