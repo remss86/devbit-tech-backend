@@ -1,6 +1,6 @@
 [package]
 name = "devbit"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.88"
 
@@ -25,3 +25,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "time"
 tracing-appender = "0.2"
 dashmap = "6.1"
 futures-util = "0.3"
+
+[dev-dependencies]
+http-body-util = "0.1"
+tower = { version = "0.5", features = ["util"] }

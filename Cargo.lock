@@ -383,7 +383,7 @@ dependencies = [
 
 [[package]]
 name = "devbit"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "axum",
  "base64",
@@ -392,6 +392,7 @@ dependencies = [
  "dotenv",
  "futures-util",
  "hmac",
+ "http-body-util",
  "jsonwebtoken",
  "lettre",
  "mime_guess",
@@ -401,6 +402,7 @@ dependencies = [
  "sha2",
  "sqlx",
  "tokio",
+ "tower",
  "tracing",
  "tracing-appender",
  "tracing-subscriber",

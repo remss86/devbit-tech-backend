@@ -1,8 +1,8 @@
-﻿# DevBit API 文档
+# DevBit API 文档
 
 > **当前版本**: `v1`  
 > **基础路径**: `http://127.0.0.1:7878`  
-> **最后更新**: 2026-06-07
+> **最后更新**: 2026-10-25
 
 ---
 
@@ -36,7 +36,7 @@
 | 端点类型     | 限制         | 说明                  |
 |-------------|-------------|----------------------|
 | 认证相关端点  | 5 req / 60s | 注册、登录、发送验证码    |
-| 通用端点     | 10 req / 60s | 其他所有 API           |
+| 通用端点     | 60 req / 60s | 其他所有 API           |
 
 - 超出限制返回 `429 Too Many Requests`，响应头 `Retry-After: 60`。
 - 限制基于客户端 IP 的滑动时间窗口。
@@ -284,7 +284,7 @@ Set-Cookie: auth_token=<jwt>; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age
 - **端点**: `GET /api/me`（兼容: `GET /me`）
 - **版本**: v1
 - **认证**: 必需
-- **速率限制**: 通用（10 req / 60s）
+- **速率限制**: 通用（60 req / 60s）
 
 **成功响应** `200`:
 ```json
@@ -309,7 +309,7 @@ Set-Cookie: auth_token=<jwt>; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age
 - **端点**: `POST /api/me/avatar`（兼容: `POST /me/avatar`）
 - **版本**: v1
 - **认证**: 必需
-- **速率限制**: 通用（10 req / 60s）
+- **速率限制**: 通用（60 req / 60s）
 - **Content-Type**: `multipart/form-data`
 
 **请求参数**:
@@ -346,7 +346,7 @@ Set-Cookie: auth_token=<jwt>; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age
 - **端点**: `GET /api/avatars/{filename}`（兼容: `GET /avatars/{filename}`）
 - **版本**: v1
 - **认证**: 无需
-- **速率限制**: 通用（10 req / 60s）
+- **速率限制**: 通用（60 req / 60s）
 
 **成功响应** `200`: 返回图片二进制数据，`Content-Type` 根据扩展名自动设置。
 
@@ -360,7 +360,7 @@ Set-Cookie: auth_token=<jwt>; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age
 - **端点**: `POST /api/logout`（兼容: `POST /logout`）
 - **版本**: v1
 - **认证**: 无需
-- **速率限制**: 通用（10 req / 60s）
+- **速率限制**: 通用（60 req / 60s）
 
 **成功响应** `200`:
 ```json
@@ -383,7 +383,7 @@ Set-Cookie: auth_token=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0; E
 - **端点**: `GET /api/forum/bootstrap`
 - **版本**: v1
 - **认证**: 可选
-- **速率限制**: 通用（10 req / 60s）
+- **速率限制**: 通用（60 req / 60s）
 
 **成功响应** `200`:
 ```json
@@ -408,7 +408,7 @@ Set-Cookie: auth_token=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0; E
 - **端点**: `GET /api/forum/users`
 - **版本**: v1
 - **认证**: 无需
-- **速率限制**: 通用（10 req / 60s）
+- **速率限制**: 通用（60 req / 60s）
 
 **成功响应** `200`: `ForumUser[]`（按 id 升序排列）
 
@@ -419,7 +419,7 @@ Set-Cookie: auth_token=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0; E
 - **端点**: `GET /api/forum/users/search?q={keyword}`
 - **版本**: v1
 - **认证**: 必需
-- **速率限制**: 通用（10 req / 60s）
+- **速率限制**: 通用（60 req / 60s）
 
 **查询参数**:
 | 参数 | 类型   | 必需 | 说明     |
@@ -442,7 +442,7 @@ Set-Cookie: auth_token=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0; E
 - **端点**: `GET /api/forum/posts?category={category}`
 - **版本**: v1
 - **认证**: 可选
-- **速率限制**: 通用（10 req / 60s）
+- **速率限制**: 通用（60 req / 60s）
 
 **查询参数**:
 | 参数     | 类型   | 必需 | 说明                         |
@@ -458,7 +458,7 @@ Set-Cookie: auth_token=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0; E
 - **端点**: `GET /api/forum/posts/{id}`
 - **版本**: v1
 - **认证**: 可选
-- **速率限制**: 通用（10 req / 60s）
+- **速率限制**: 通用（60 req / 60s）
 
 **路径参数**:
 | 参数 | 类型 | 说明    |
@@ -479,7 +479,7 @@ Set-Cookie: auth_token=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0; E
 - **端点**: `GET /api/forum/posts/search?q={keyword}`
 - **版本**: v1
 - **认证**: 可选
-- **速率限制**: 通用（10 req / 60s）
+- **速率限制**: 通用（60 req / 60s）
 
 **查询参数**:
 | 参数 | 类型   | 必需 | 说明     |
@@ -498,7 +498,7 @@ Set-Cookie: auth_token=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0; E
 - **端点**: `POST /api/forum/posts`
 - **版本**: v1
 - **认证**: 必需
-- **速率限制**: 通用（10 req / 60s）
+- **速率限制**: 通用（60 req / 60s）
 
 **请求体**:
 ```json
@@ -529,7 +529,7 @@ Set-Cookie: auth_token=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0; E
 - **端点**: `DELETE /api/forum/posts/{id}`
 - **版本**: v1
 - **认证**: 必需（帖子作者或管理员）
-- **速率限制**: 通用（10 req / 60s）
+- **速率限制**: 通用（60 req / 60s）
 
 **成功响应**: `204 No Content`
 
@@ -547,7 +547,7 @@ Set-Cookie: auth_token=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0; E
 - **端点**: `PUT /api/forum/posts/{id}/pin`
 - **版本**: v1
 - **认证**: 必需（管理员）
-- **速率限制**: 通用（10 req / 60s）
+- **速率限制**: 通用（60 req / 60s）
 
 **成功响应** `200**: `ForumPost`（更新后的帖子）
 
@@ -563,7 +563,7 @@ Set-Cookie: auth_token=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0; E
 - **端点**: `PUT /api/forum/posts/{id}/lock`
 - **版本**: v1
 - **认证**: 必需（管理员）
-- **速率限制**: 通用（10 req / 60s）
+- **速率限制**: 通用（60 req / 60s）
 
 - 锁定的帖子禁止发表新评论。
 
@@ -581,7 +581,7 @@ Set-Cookie: auth_token=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0; E
 - **端点**: `PUT /api/forum/posts/{id}/like`
 - **版本**: v1
 - **认证**: 必需
-- **速率限制**: 通用（10 req / 60s）
+- **速率限制**: 通用（60 req / 60s）
 
 - 切换操作：若已点赞则取消，若未点赞则点赞。
 
@@ -598,7 +598,7 @@ Set-Cookie: auth_token=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0; E
 - **端点**: `GET /api/forum/posts/myposts`
 - **版本**: v1
 - **认证**: 必需
-- **速率限制**: 通用（10 req / 60s）
+- **速率限制**: 通用（60 req / 60s）
 
 **成功响应** `200**: `ForumPost[]`（当前用户的所有帖子）
 
@@ -612,7 +612,7 @@ Set-Cookie: auth_token=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0; E
 - **端点**: `PUT /api/forum/posts/myposts/modify_post/{id}`
 - **版本**: v1
 - **认证**: 必需（帖子作者或管理员）
-- **速率限制**: 通用（10 req / 60s）
+- **速率限制**: 通用（60 req / 60s）
 
 **路径参数**:
 | 参数 | 类型 | 说明    |
@@ -644,7 +644,7 @@ Set-Cookie: auth_token=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0; E
 - **端点**: `GET /api/forum/posts/{id}/comments`
 - **版本**: v1
 - **认证**: 无需
-- **速率限制**: 通用（10 req / 60s）
+- **速率限制**: 通用（60 req / 60s）
 
 **成功响应** `200**: `ForumComment[]`（按创建时间升序）
 
@@ -655,7 +655,7 @@ Set-Cookie: auth_token=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0; E
 - **端点**: `POST /api/forum/posts/{id}/comments`
 - **版本**: v1
 - **认证**: 必需
-- **速率限制**: 通用（10 req / 60s）
+- **速率限制**: 通用（60 req / 60s）
 
 **请求体**:
 ```json
@@ -678,7 +678,7 @@ Set-Cookie: auth_token=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0; E
 - **端点**: `DELETE /api/forum/comments/{id}`
 - **版本**: v1
 - **认证**: 必需（评论作者或管理员）
-- **速率限制**: 通用（10 req / 60s）
+- **速率限制**: 通用（60 req / 60s）
 
 **成功响应**: `204 No Content`
 
@@ -696,7 +696,7 @@ Set-Cookie: auth_token=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0; E
 - **端点**: `GET /api/forum/messages`
 - **版本**: v1
 - **认证**: 必需
-- **速率限制**: 通用（10 req / 60s）
+- **速率限制**: 通用（60 req / 60s）
 
 **成功响应** `200**: `ForumMessage[]`（与当前用户相关的所有私信，按时间升序）
 
@@ -707,7 +707,7 @@ Set-Cookie: auth_token=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0; E
 - **端点**: `POST /api/forum/messages`
 - **版本**: v1
 - **认证**: 必需
-- **速率限制**: 通用（10 req / 60s）
+- **速率限制**: 通用（60 req / 60s）
 
 **请求体**:
 ```json
@@ -730,7 +730,7 @@ Set-Cookie: auth_token=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0; E
 - **端点**: `PUT /api/forum/messages/{id}/read`
 - **版本**: v1
 - **认证**: 必需（接收者本人）
-- **速率限制**: 通用（10 req / 60s）
+- **速率限制**: 通用（60 req / 60s）
 
 **成功响应**: `204 No Content`
 
@@ -745,7 +745,7 @@ Set-Cookie: auth_token=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0; E
 - **端点**: `PUT /api/forum/messages/conversation/{partnerId}/read`
 - **版本**: v1
 - **认证**: 必需
-- **速率限制**: 通用（10 req / 60s）
+- **速率限制**: 通用（60 req / 60s）
 
 - 将对方发来且未读的所有私信标记为已读。
 
@@ -764,7 +764,7 @@ Set-Cookie: auth_token=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0; E
 - **端点**: `GET /api/forum/friends`
 - **版本**: v1
 - **认证**: 必需
-- **速率限制**: 通用（10 req / 60s）
+- **速率限制**: 通用（60 req / 60s）
 
 **成功响应** `200**: `FriendInfo[]`（按好友名字母序排列）
 
@@ -775,7 +775,7 @@ Set-Cookie: auth_token=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0; E
 - **端点**: `POST /api/forum/friends`
 - **版本**: v1
 - **认证**: 必需
-- **速率限制**: 通用（10 req / 60s）
+- **速率限制**: 通用（60 req / 60s）
 
 **请求体**:
 ```json
@@ -800,13 +800,48 @@ Set-Cookie: auth_token=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0; E
 - **端点**: `DELETE /api/forum/friends/{friendId}`
 - **版本**: v1
 - **认证**: 必需
-- **速率限制**: 通用（10 req / 60s）
+- **速率限制**: 通用（60 req / 60s）
 
 **成功响应**: `204 No Content`
 
 **错误响应**:
 - `401` — 未认证
 - `404` — 好友关系不存在
+
+---
+
+### 8. Social V2
+
+Social V2 的详细契约、字段与实现状态见 [SOCIAL-API-V2.md](./SOCIAL-API-V2.md)。前缀为 `/api/v2/social`（兼容无 `/api` 前缀），全部需要登录，错误统一返回：
+
+```json
+{
+  "error": {
+    "code": "VALIDATION_FAILED",
+    "message": "请求参数不合法",
+    "fieldErrors": { "recipientId": "不能向自己发送好友申请" }
+  }
+}
+```
+
+| 方法与路径 | 说明 |
+|---|---|
+| `GET /users?q=&cursor=&limit=` | 搜索用户，返回关系、`requestId`、`canMessage` |
+| `GET /friends?cursor=&limit=` | 双方确认的好友，按建立时间倒序 |
+| `GET /friend-requests?direction=incoming\|outgoing&status=pending&cursor=` | 好友申请列表 |
+| `POST /friend-requests` | 发送申请；重复发送返回已有 pending 申请 |
+| `POST /friend-requests/{id}/accept` | 接收方接受，原子建立双向关系 |
+| `POST /friend-requests/{id}/reject` | 接收方拒绝 |
+| `DELETE /friend-requests/{id}` | 发送方撤回 pending 申请 |
+| `DELETE /friends/{userId}` | 双向解除好友，幂等 |
+| `GET /blocks`、`PUT/DELETE /blocks/{userId}` | 屏蔽列表与幂等屏蔽/解除 |
+| `GET/PATCH /preferences` | 私信与好友申请接收偏好 |
+| `GET /presence?userIds=1,2` | 本人及好友的在线快照 |
+| `DELETE /conversations/{userId}/history` | 只清除自己的会话可见记录 |
+
+分页响应为 `{ "items": [], "nextCursor": null }`；游标不透明，失效时返回 `400 BAD_CURSOR`。
+
+私信 `POST /api/forum/messages` 仍使用原 v1 响应结构，但服务端会执行双向屏蔽与接收方偏好校验，违规返回 `403`。
 
 ---
 
@@ -843,7 +878,12 @@ Set-Cookie: auth_token=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0; E
 | `forum_comments`    | 帖子评论  |
 | `forum_messages`    | 私信      |
 | `forum_post_likes`  | 帖子点赞  |
-| `friends`           | 好友关系  |
+| `friends`           | 旧版单向联系人 |
+| `social_friend_requests` | Social V2 好友申请 |
+| `social_friendships` | Social V2 双向好友（规范化为 `user_low < user_high`） |
+| `social_blocks` | 用户屏蔽关系 |
+| `social_preferences` | 私信/好友申请接收偏好 |
+| `social_message_clears` | 每个用户自己的会话历史可见边界 |
 
 ### D. 头像系统
 

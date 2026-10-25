@@ -1,4 +1,4 @@
-use crate::auth;
+use crate::{auth, social};
 use axum::{
     Extension, Json, Router,
     extract::{Path, Query, State},
@@ -9,7 +9,25 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::{Pool, Postgres, Row, postgres::PgRow};
 
-#[derive(Serialize, Deserialize, Clone)]
+const MAX_POST_TITLE_CHARS: usize = 200;
+const MAX_POST_CONTENT_CHARS: usize = 50_000;
+const MAX_COMMENT_CHARS: usize = 10_000;
+const MAX_MESSAGE_CHARS: usize = 10_000;
+const MAX_CATEGORY_CHARS: usize = 32;
+const MAX_TAGS: usize = 10;
+const MAX_TAG_CHARS: usize = 24;
+
+/// Trim user text and enforce a hard character budget (not byte length, so
+/// UTF-8 content is counted the same way the UI counts it).
+fn validate_content(value: &str, max_chars: usize) -> Result<String, StatusCode> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed.chars().count() > max_chars {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    Ok(trimmed.to_string())
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct ForumUser {
     pub id: i32,
@@ -123,7 +141,7 @@ impl LikeSearch {
     }
 }
 
-fn escape_like_pattern(query: &str) -> String {
+pub(crate) fn escape_like_pattern(query: &str) -> String {
     let mut escaped = String::with_capacity(query.len());
     for ch in query.chars() {
         if matches!(ch, '%' | '_' | '\\') {
@@ -172,7 +190,7 @@ fn avatar_for_user(id: i32, name: &str) -> String {
     initials
 }
 
-fn forum_user(id: i32, name: String, avatar_url: Option<String>) -> ForumUser {
+pub(crate) fn forum_user(id: i32, name: String, avatar_url: Option<String>) -> ForumUser {
     ForumUser {
         id,
         avatar: avatar_for_user(id, &name),
@@ -393,7 +411,16 @@ async fn fetch_messages_for_user(
          FROM forum_messages m
          JOIN users s ON s.id = m.sender_id
          JOIN users r ON r.id = m.recipient_id
-         WHERE m.sender_id = $1 OR m.recipient_id = $1
+         WHERE (m.sender_id = $1 OR m.recipient_id = $1)
+           AND NOT EXISTS (
+               SELECT 1 FROM social_message_clears c
+               WHERE c.user_id = $1
+                 AND c.partner_id = CASE
+                     WHEN m.sender_id = $1 THEN m.recipient_id
+                     ELSE m.sender_id
+                 END
+                 AND m.id <= c.cleared_through_id
+           )
          ORDER BY m.created_at ASC",
     )
     .bind(user_id)
@@ -513,16 +540,35 @@ async fn create_post(
     Json(payload): Json<CreatePostRequest>,
 ) -> Result<Json<ForumPost>, StatusCode> {
     let user = require_current_user(&pool, &headers).await?;
-    let category = payload.category.unwrap_or_else(|| "general".to_string());
-    let tags = payload.tags.unwrap_or_default();
+    let title = validate_content(&payload.title, MAX_POST_TITLE_CHARS)?;
+    let content = validate_content(&payload.content, MAX_POST_CONTENT_CHARS)?;
+    let category = payload
+        .category
+        .as_deref()
+        .unwrap_or("general")
+        .trim()
+        .to_string();
+    if category.is_empty() || category.chars().count() > MAX_CATEGORY_CHARS {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let tags: Vec<String> = payload
+        .tags
+        .unwrap_or_default()
+        .into_iter()
+        .map(|tag| tag.trim().to_string())
+        .filter(|tag| !tag.is_empty())
+        .collect();
+    if tags.len() > MAX_TAGS || tags.iter().any(|tag| tag.chars().count() > MAX_TAG_CHARS) {
+        return Err(StatusCode::BAD_REQUEST);
+    }
 
     let row = sqlx::query(
         "INSERT INTO forum_posts (title, content, author_id, category, tags)
          VALUES ($1, $2, $3, $4, $5)
          RETURNING id, created_at, updated_at",
     )
-    .bind(&payload.title)
-    .bind(&payload.content)
+    .bind(&title)
+    .bind(&content)
     .bind(user.id)
     .bind(&category)
     .bind(&tags)
@@ -535,8 +581,8 @@ async fn create_post(
 
     Ok(Json(ForumPost {
         id: row.get("id"),
-        title: payload.title,
-        content: payload.content,
+        title,
+        content,
         author: user,
         category,
         tags,
@@ -586,13 +632,14 @@ async fn modify_post(
 ) -> Result<StatusCode, StatusCode> {
     let user = require_current_user(&pool, &headers).await?;
     require_post_moderator(&pool, id, &user).await?;
+    let content = validate_content(&payload.content, MAX_POST_CONTENT_CHARS)?;
 
     let result = sqlx::query(
         "UPDATE forum_posts
 SET content = $1,updated_at = NOW() 
 WHERE id = $2;",
     )
-    .bind(payload.content)
+    .bind(content)
     .bind(id)
     .execute(&pool)
     .await
@@ -750,6 +797,7 @@ async fn create_comment(
     Json(payload): Json<CreateCommentRequest>,
 ) -> Result<Json<ForumComment>, StatusCode> {
     let user = require_current_user(&pool, &headers).await?;
+    let content = validate_content(&payload.content, MAX_COMMENT_CHARS)?;
 
     let post = sqlx::query("SELECT is_locked FROM forum_posts WHERE id = $1")
         .bind(post_id)
@@ -773,7 +821,7 @@ async fn create_comment(
     )
     .bind(post_id)
     .bind(user.id)
-    .bind(&payload.content)
+    .bind(&content)
     .fetch_one(&pool)
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -784,7 +832,7 @@ async fn create_comment(
         id: row.get("id"),
         post_id,
         author: user,
-        content: payload.content,
+        content,
         created_at: created_at.to_rfc3339(),
     }))
 }
@@ -826,7 +874,19 @@ async fn send_message(
     Json(payload): Json<SendMessageRequest>,
 ) -> Result<Json<ForumMessage>, StatusCode> {
     let sender = require_current_user(&pool, &headers).await?;
+    if sender.id == payload.recipient_id {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let content = validate_content(&payload.content, MAX_MESSAGE_CHARS)?;
     let recipient = get_current_user(&pool, payload.recipient_id).await?;
+
+    match social::message_permission(&pool, sender.id, recipient.id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    {
+        social::MessagePermission::Allowed => {}
+        _ => return Err(StatusCode::FORBIDDEN),
+    }
 
     let row = sqlx::query(
         "INSERT INTO forum_messages (sender_id, recipient_id, content)
@@ -835,7 +895,7 @@ async fn send_message(
     )
     .bind(sender.id)
     .bind(payload.recipient_id)
-    .bind(&payload.content)
+    .bind(&content)
     .fetch_one(&pool)
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -846,13 +906,13 @@ async fn send_message(
         id: row.get("id"),
         sender: sender.clone(),
         recipient: recipient.clone(),
-        content: payload.content.clone(),
+        content: content.clone(),
         created_at: created_at.to_rfc3339(),
         is_read: false,
     };
 
     // Push WebSocket notification to recipient
-    let content_preview = message_preview(&payload.content);
+    let content_preview = message_preview(&content);
     let ws_msg = serde_json::json!({
         "type": "new_message",
         "message_id": message.id,
@@ -861,6 +921,14 @@ async fn send_message(
         "content_preview": content_preview,
     });
     ws_state.send_to_user(payload.recipient_id, &ws_msg.to_string());
+
+    for (user_id, actor_id) in [(recipient.id, sender.id), (sender.id, recipient.id)] {
+        let event = serde_json::json!({
+            "type": "conversation_changed",
+            "userId": actor_id,
+        });
+        ws_state.send_to_user(user_id, &event.to_string());
+    }
 
     Ok(Json(message))
 }
@@ -1122,7 +1190,15 @@ pub fn forum_routes() -> Router<Pool<Postgres>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{UpdatePostRequest, message_preview};
+    use super::{UpdatePostRequest, message_preview, validate_content};
+
+    #[test]
+    fn content_validation_trims_and_counts_characters() {
+        assert_eq!(validate_content("  hello  ", 10).unwrap(), "hello");
+        assert!(validate_content("   ", 10).is_err());
+        assert!(validate_content(&"a".repeat(11), 10).is_err());
+        assert!(validate_content(&"界".repeat(10), 10).is_ok());
+    }
 
     #[test]
     fn message_preview_preserves_up_to_sixty_characters() {
