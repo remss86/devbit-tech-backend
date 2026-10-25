@@ -10,9 +10,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Relationship {
-    /// Reserved for endpoints that return the caller's own profile.
     #[serde(rename = "self")]
-    #[allow(dead_code)]
     Current,
     #[serde(rename = "none")]
     None,
@@ -125,6 +123,21 @@ impl SocialUser {
 pub struct Friendship {
     pub user: SocialUser,
     pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecentPost {
+    pub id: i32,
+    pub title: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SocialProfile {
+    #[serde(flatten)]
+    pub user: SocialUser,
+    pub recent_posts: Vec<RecentPost>,
 }
 
 #[derive(Debug, Clone, Serialize)]

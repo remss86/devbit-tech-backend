@@ -19,8 +19,8 @@ use std::collections::HashSet;
 
 use super::model::{
     CreateFriendRequestPayload, FriendRequest, FriendRequestPolicy, Friendship, MessagePolicy,
-    Page, PreferencesPatch, PresenceEntry, PresenceSnapshot, Relationship, SocialPreferences,
-    SocialUser,
+    Page, PreferencesPatch, PresenceEntry, PresenceSnapshot, RecentPost, Relationship,
+    SocialPreferences, SocialProfile, SocialUser,
 };
 
 const MAX_FRIEND_REQUEST_MESSAGE_CHARS: usize = 200;
@@ -118,6 +118,110 @@ pub(crate) async fn search_users(
     Ok(Json(Page::new(items, next_cursor)))
 }
 
+pub(crate) async fn get_profile(
+    State(pool): State<Pool<Postgres>>,
+    Path(user_id): Path<i64>,
+    headers: HeaderMap,
+) -> Result<Json<SocialProfile>, SocialError> {
+    let viewer = require_viewer(&pool, &headers).await?;
+    let target_id = positive_id(user_id, "userId")?;
+    let target = load_forum_user(&pool, target_id)
+        .await
+        .map_err(SocialError::internal)?
+        .ok_or_else(SocialError::user_not_found)?;
+
+    let context = RelationshipContext::load(&pool, viewer.id, &[target_id])
+        .await
+        .map_err(SocialError::internal)?;
+    let (relationship, request_id) = if target_id == viewer.id {
+        (Relationship::Current, None)
+    } else {
+        context.relationship(target_id)
+    };
+    let can_message = target_id != viewer.id && context.can_message(viewer.id, target_id);
+
+    let rows = sqlx::query(
+        "SELECT id, title FROM forum_posts
+         WHERE author_id = $1
+         ORDER BY created_at DESC, id DESC
+         LIMIT 5",
+    )
+    .bind(target_id)
+    .fetch_all(&pool)
+    .await
+    .map_err(SocialError::internal)?;
+
+    let recent_posts = rows
+        .iter()
+        .map(|row| RecentPost {
+            id: row.get("id"),
+            title: row.get("title"),
+        })
+        .collect();
+
+    Ok(Json(SocialProfile {
+        user: SocialUser::new(target, relationship, request_id, can_message),
+        recent_posts,
+    }))
+}
+
+/// Posts written by confirmed friends, newest first.
+pub(crate) async fn friend_feed(
+    State(pool): State<Pool<Postgres>>,
+    Query(query): Query<super::LimitQuery>,
+    headers: HeaderMap,
+) -> Result<Json<Page<forum::ForumPost>>, SocialError> {
+    let viewer = require_viewer(&pool, &headers).await?;
+    let cursor = decode_time_cursor(query.cursor.as_deref())?;
+    let limit = page_limit(query.limit);
+
+    let mut rows = sqlx::query(
+        "SELECT p.id, p.title, p.content, p.author_id, p.category, p.tags,
+                p.created_at, p.updated_at, p.view_count::BIGINT AS view_count,
+                p.is_pinned, p.is_locked,
+                u.name AS author_name, u.avatar_url AS author_avatar_url,
+                (SELECT COUNT(*) FROM forum_comments WHERE post_id = p.id)::BIGINT AS comment_count,
+                COUNT(l.user_id)::BIGINT AS like_count,
+                COALESCE(BOOL_OR(l.user_id = $1), false) AS liked_by_me
+         FROM forum_posts p
+         JOIN users u ON u.id = p.author_id
+         LEFT JOIN forum_post_likes l ON l.post_id = p.id
+         WHERE p.author_id IN (
+             SELECT CASE WHEN f.user_low = $1 THEN f.user_high ELSE f.user_low END
+             FROM social_friendships f
+             WHERE f.user_low = $1 OR f.user_high = $1
+         )
+           AND p.author_id NOT IN (
+             SELECT CASE WHEN b.user_id = $1 THEN b.blocked_id ELSE b.user_id END
+             FROM social_blocks b
+             WHERE b.user_id = $1 OR b.blocked_id = $1
+           )
+           AND ($2::timestamptz IS NULL OR (p.created_at, p.id) < ($2::timestamptz, $3::int))
+         GROUP BY p.id, u.name, u.avatar_url
+         ORDER BY p.created_at DESC, p.id DESC
+         LIMIT $4",
+    )
+    .bind(viewer.id)
+    .bind(cursor.map(|value| value.at))
+    .bind(i32::try_from(cursor.map(|value| value.id).unwrap_or(0)).unwrap_or(0))
+    .bind(limit + 1)
+    .fetch_all(&pool)
+    .await
+    .map_err(SocialError::internal)?;
+
+    let has_more = rows.len() as i64 > limit;
+    rows.truncate(limit as usize);
+    let items = rows.iter().map(forum::row_to_post).collect();
+
+    let next_cursor = has_more.then(|| {
+        let last = rows
+            .last()
+            .expect("rows is non-empty when has_more is true");
+        encode_time_cursor(last.get("created_at"), i64::from(last.get::<i32, _>("id")))
+    });
+    Ok(Json(Page::new(items, next_cursor)))
+}
+
 pub(crate) async fn list_friends(
     State(pool): State<Pool<Postgres>>,
     Query(query): Query<FriendsQuery>,
@@ -139,6 +243,10 @@ pub(crate) async fn list_friends(
 
     let mut rows = sqlx::query(
         "SELECT f.created_at, u.id, u.name, u.avatar_url,
+                EXISTS (
+                    SELECT 1 FROM social_blocks b
+                    WHERE b.user_id = $1 AND b.blocked_id = u.id
+                ) AS blocked_by_me,
                 (NOT EXISTS (
                     SELECT 1 FROM social_blocks b
                     WHERE (b.user_id = $1 AND b.blocked_id = u.id)
@@ -171,10 +279,15 @@ pub(crate) async fn list_friends(
         .map(|row| {
             let id: i32 = row.get("id");
             let created_at: DateTime<Utc> = row.get("created_at");
+            let relationship = if row.get::<bool, _>("blocked_by_me") {
+                Relationship::Blocked
+            } else {
+                Relationship::Friends
+            };
             Friendship {
                 user: SocialUser::new(
                     forum::forum_user(id, row.get("name"), row.get("avatar_url")),
-                    Relationship::Friends,
+                    relationship,
                     None,
                     row.get("can_message"),
                 ),
