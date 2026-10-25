@@ -378,3 +378,26 @@ async fn clear_history_hides_only_the_viewer_side() {
     let (_, bob_messages) = request(&app, "GET", "/api/forum/messages", 2, None).await;
     assert_eq!(bob_messages.as_array().unwrap().len(), 1);
 }
+
+#[tokio::test]
+async fn legacy_one_way_friends_are_removed() {
+    let _guard = TEST_LOCK.lock().await;
+    let pool = setup().await;
+
+    let table: Option<String> = sqlx::query_scalar("SELECT to_regclass('public.friends')::text")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(table.is_none(), "legacy friends table still exists");
+
+    let archive: Option<String> =
+        sqlx::query_scalar("SELECT to_regclass('public.friends_legacy_archive')::text")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(archive.is_some(), "legacy friends archive is missing");
+
+    let app = app(pool);
+    let (status, _) = request(&app, "GET", "/api/forum/friends", 1, None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}

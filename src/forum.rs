@@ -152,19 +152,6 @@ pub(crate) fn escape_like_pattern(query: &str) -> String {
     escaped
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AddFriendRequest {
-    pub friend_id: i32,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct FriendInfo {
-    pub user: ForumUser,
-    pub created_at: String,
-}
-
 ///初始化未定义头像
 fn avatar_for_user(id: i32, name: &str) -> String {
     match id {
@@ -1028,96 +1015,6 @@ async fn search_posts(
     Ok(Json(rows.iter().map(row_to_post).collect()))
 }
 
-async fn list_friends(
-    State(pool): State<Pool<Postgres>>,
-    headers: HeaderMap,
-) -> Result<Json<Vec<FriendInfo>>, StatusCode> {
-    let user = require_current_user(&pool, &headers).await?;
-
-    let rows = sqlx::query(
-        "SELECT u.id, u.name, u.avatar_url, f.created_at
-         FROM friends f
-         JOIN users u ON u.id = f.friend_id
-         WHERE f.user_id = $1
-         ORDER BY u.name ASC",
-    )
-    .bind(user.id)
-    .fetch_all(&pool)
-    .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    Ok(Json(
-        rows.iter()
-            .map(|row| {
-                let id: i32 = row.get("id");
-                let name: String = row.get("name");
-                let avatar_url: Option<String> = row.get("avatar_url");
-                let created_at: DateTime<Utc> = row.get("created_at");
-                FriendInfo {
-                    user: forum_user(id, name, avatar_url),
-                    created_at: created_at.to_rfc3339(),
-                }
-            })
-            .collect(),
-    ))
-}
-
-///TODO:双向加好友
-async fn add_friend(
-    State(pool): State<Pool<Postgres>>,
-    headers: HeaderMap,
-    Json(payload): Json<AddFriendRequest>,
-) -> Result<Json<FriendInfo>, StatusCode> {
-    let user = require_current_user(&pool, &headers).await?;
-
-    if payload.friend_id == user.id {
-        return Err(StatusCode::BAD_REQUEST);
-    }
-
-    // Verify friend exists
-    let friend = get_current_user(&pool, payload.friend_id).await?;
-
-    let row = sqlx::query(
-        "INSERT INTO friends (user_id, friend_id)
-         VALUES ($1, $2)
-         ON CONFLICT (user_id, friend_id) DO UPDATE SET created_at = NOW()
-         RETURNING created_at",
-    )
-    .bind(user.id)
-    .bind(payload.friend_id)
-    .fetch_one(&pool)
-    .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    let created_at: DateTime<Utc> = row.get("created_at");
-
-    Ok(Json(FriendInfo {
-        user: friend,
-        created_at: created_at.to_rfc3339(),
-    }))
-}
-
-async fn remove_friend(
-    State(pool): State<Pool<Postgres>>,
-    Path(friend_id): Path<i32>,
-    headers: HeaderMap,
-) -> Result<StatusCode, StatusCode> {
-    let user = require_current_user(&pool, &headers).await?;
-
-    let result = sqlx::query("DELETE FROM friends WHERE user_id = $1 AND friend_id = $2")
-        .bind(user.id)
-        .bind(friend_id)
-        .execute(&pool)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    if result.rows_affected() == 0 {
-        Err(StatusCode::NOT_FOUND)
-    } else {
-        Ok(StatusCode::NO_CONTENT)
-    }
-}
-
 ///TODO:UID唯一搜索
 async fn search_users(
     State(pool): State<Pool<Postgres>>,
@@ -1178,8 +1075,6 @@ pub fn forum_routes() -> Router<Pool<Postgres>> {
             "/api/forum/messages/conversation/{partner_id}/read",
             put(mark_conversation_read),
         )
-        .route("/api/forum/friends", get(list_friends).post(add_friend))
-        .route("/api/forum/friends/{friend_id}", delete(remove_friend))
         .route("/api/forum/users/search", get(search_users))
         .route("/api/forum/posts/myposts", get(my_posts))
         .route(

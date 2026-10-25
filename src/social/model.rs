@@ -14,7 +14,6 @@ pub enum Relationship {
     Current,
     #[serde(rename = "none")]
     None,
-    Contact,
     OutgoingPending,
     IncomingPending,
     Friends,

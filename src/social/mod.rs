@@ -379,7 +379,6 @@ pub(crate) struct RelationshipContext {
     blocking_me: HashSet<i32>,
     outgoing: HashMap<i32, i64>,
     incoming: HashMap<i32, i64>,
-    contacts: HashSet<i32>,
     policies: HashMap<i32, MessagePolicy>,
 }
 
@@ -446,14 +445,6 @@ impl RelationshipContext {
             }
         }
 
-        let rows =
-            sqlx::query("SELECT friend_id FROM friends WHERE user_id = $1 AND friend_id = ANY($2)")
-                .bind(viewer_id)
-                .bind(targets)
-                .fetch_all(pool)
-                .await?;
-        context.contacts = rows.iter().map(|row| row.get("friend_id")).collect();
-
         let rows = sqlx::query(
             "SELECT user_id, message_policy FROM social_preferences WHERE user_id = ANY($1)",
         )
@@ -483,9 +474,6 @@ impl RelationshipContext {
         }
         if let Some(request_id) = self.incoming.get(&target_id) {
             return (model::Relationship::IncomingPending, Some(*request_id));
-        }
-        if self.contacts.contains(&target_id) {
-            return (model::Relationship::Contact, None);
         }
         (model::Relationship::None, None)
     }
