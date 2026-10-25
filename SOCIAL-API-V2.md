@@ -193,7 +193,7 @@ V2 模式也由统一服务调用这些端点；后端必须同步在实际发�
 | 社交 WebSocket 事件 | 可联调 | 鉴权、重连恢复、控制推送频率 |
 | 账号恢复与邮件 | 待适配 | 通用提示、验证码单次有效、频控与会话策略 |
 
-### 后端实现说明（0.2.0）
+### 后端实现说明（0.3.0）
 
 已实现的前缀为 `/api/v2/social`（同时兼容无 `/api` 前缀）：
 
@@ -202,25 +202,27 @@ V2 模式也由统一服务调用这些端点；后端必须同步在实际发�
 - `DELETE /friends/{userId}`、`PUT/DELETE /blocks/{userId}`：幂等；屏蔽会取消双方 pending 申请，但保留历史好友关系。
 - `GET/PATCH /preferences`：`messagePolicy` 为 `everyone | friends | nobody`，`friendRequestPolicy` 为 `everyone | nobody`；未保存时返回默认值。
 - `GET /presence?userIds=...`：只返回本人与已确认好友，最多 100 个；在线值来自 WebSocket 连接，未连接为 `offline`。
+- `GET /users/{userId}/profile`：返回 `SocialUser` 字段、查看者关系、`canMessage` 以及最近 5 篇帖子的 `recentPosts`；`bio`/`interests` 尚未实现并省略。
+- `GET /feed`：已确认好友的帖子动态流，返回现有 `ForumPost` 结构，游标分页。
 - `DELETE /conversations/{userId}/history`：只改变当前账号的可见性，不删除消息。
 - 私信 `POST /api/forum/messages` 在服务端执行双向屏蔽和接收方偏好校验，违规返回 403。
 - 错误响应统一为 `{"error":{"code","message","fieldErrors?","retryAfterSeconds?"}}`，业务码沿用本文上表；未知用户 404 `USER_NOT_FOUND`，申请不存在 404 `REQUEST_NOT_FOUND`。
 - WebSocket 事件在 `{type, userId?, requestId?}` 信封内发送；前端应把事件当作缓存失效信号并重新读取鉴权接口。
 
-尚未适配：历史单向联系人自动迁移、好友备注/分组/公开资料、会话工作台与发送幂等、账号恢复与邮件。它们不会因为本次后端升级而自动启用。
+尚未适配：历史单向联系人自动迁移、好友备注/分组、公开资料的 bio/interests 字段、会话工作台与发送幂等、账号恢复与邮件。它们不会因为本次后端升级而自动启用。
 
 联调顺序：保持 legacy → 在测试环境完成核心整组并选择 v2 → 逐项启用扩展开关 → 两个独立账号验证关系、权限、历史与事件 → 默认生产构建与部署验收。前端本轮没有修改 Rust、数据库或执行线上部署。
 
 ## 好友中心与私信工作台扩展契约
 
-以下均为**前端已实现、后端待适配**。路径前缀 `/api/v2/social`，身份来自会话 Cookie，路径中的用户 ID 均为会话另一方 ID，不能指定数据所有者。沿用正安全整数 ID、ISO 8601 时间、camelCase、真实 HTTP 错误及不透明分页游标。所有扩展默认关闭，不会因 404/网络故障退回 Mock 或旧写接口。
+以下扩展中，公开资料 `GET /users/{userId}/profile` 与好友动态 `GET /feed` 已提供只读接口；备注、分组、汇总、会话工作台等仍待适配。路径前缀 `/api/v2/social`，身份来自会话 Cookie，路径中的用户 ID 均为会话另一方 ID，不能指定数据所有者。沿用正安全整数 ID、ISO 8601 时间、camelCase、真实 HTTP 错误及不透明分页游标。所有扩展默认关闭，不会因 404/网络故障退回 Mock 或旧写接口。
 
 ### 能力开关
 
 | 环境变量（NUXT_PUBLIC_SOCIAL_ 前缀） | 对应能力 | 启用条件 |
 |---|---|---|
 | `DIRECTORY_ENABLED` | directory | 服务端好友筛选、汇总均完成 |
-| `PROFILES_ENABLED` | profiles | 公开资料及当前查看者关系/私信权限 |
+| `PROFILES_ENABLED` | profiles | 公开资料、`recentPosts` 及当前查看者关系/私信权限（bio/interests 未提供） |
 | `METADATA_ENABLED` | metadata | 私人备注与星标持久化 |
 | `GROUPS_ENABLED` | groups | 分组 CRUD、单一归属，需同时启用 metadata |
 | `CONVERSATIONS_ENABLED` | conversations | 会话列表、历史分页、发送幂等、偏好及标记已读整组完成 |
