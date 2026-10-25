@@ -18,9 +18,10 @@ use sqlx::{Pool, Postgres, Row};
 use std::collections::HashSet;
 
 use super::model::{
-    CreateFriendRequestPayload, FriendRequest, FriendRequestPolicy, Friendship, MessagePolicy,
-    Page, PreferencesPatch, PresenceEntry, PresenceSnapshot, RecentPost, Relationship,
-    SocialPreferences, SocialProfile, SocialUser,
+    CreateFriendRequestPayload, FriendGroup, FriendMetadata, FriendMetadataPatch, FriendRequest,
+    FriendRequestPolicy, Friendship, GroupPayload, MessagePolicy, Page, PreferencesPatch,
+    PresenceEntry, PresenceSnapshot, RecentPost, Relationship, SocialPreferences, SocialProfile,
+    SocialSummary, SocialUser,
 };
 
 const MAX_FRIEND_REQUEST_MESSAGE_CHARS: usize = 200;
@@ -33,10 +34,14 @@ pub(crate) struct SearchUsersQuery {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct FriendsQuery {
     q: Option<String>,
     cursor: Option<String>,
     limit: Option<u32>,
+    status: Option<String>,
+    starred: Option<bool>,
+    group_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -182,7 +187,9 @@ pub(crate) async fn friend_feed(
                 u.name AS author_name, u.avatar_url AS author_avatar_url,
                 (SELECT COUNT(*) FROM forum_comments WHERE post_id = p.id)::BIGINT AS comment_count,
                 COUNT(l.user_id)::BIGINT AS like_count,
-                COALESCE(BOOL_OR(l.user_id = $1), false) AS liked_by_me
+                COALESCE(BOOL_OR(l.user_id = $1), false) AS liked_by_me,
+                (SELECT COUNT(*) FROM forum_reposts r WHERE r.post_id = p.id)::BIGINT AS repost_count,
+                EXISTS(SELECT 1 FROM forum_reposts r WHERE r.post_id = p.id AND r.user_id = $1) AS reposted_by_me
          FROM forum_posts p
          JOIN users u ON u.id = p.author_id
          LEFT JOIN forum_post_likes l ON l.post_id = p.id
@@ -224,13 +231,37 @@ pub(crate) async fn friend_feed(
 
 pub(crate) async fn list_friends(
     State(pool): State<Pool<Postgres>>,
+    Extension(ws_state): Extension<ws::WsState>,
     Query(query): Query<FriendsQuery>,
     headers: HeaderMap,
 ) -> Result<Json<Page<Friendship>>, SocialError> {
     let viewer = require_viewer(&pool, &headers).await?;
     let search_term = validate_query(query.q.as_deref())?;
-    let cursor = decode_time_cursor(query.cursor.as_deref())?;
+    let cursor = decode_offset_cursor(query.cursor.as_deref())?;
     let limit = page_limit(query.limit);
+
+    if let Some(status) = query.status.as_deref()
+        && status != "online"
+    {
+        return Err(SocialError::validation("status", "status 只支持 online"));
+    }
+    let online_only = query.status.as_deref() == Some("online");
+    let online_ids: Option<Vec<i32>> = online_only.then(|| ws_state.online_user_ids());
+
+    // `groupId` is deliberately a string: the frontend encodes "all groups" by
+    // omitting it and "ungrouped" as `groupId=null`.
+    let group_filter = match query.group_id.as_deref() {
+        None => None,
+        Some("null") | Some("") => Some(None),
+        Some(value) => Some(Some(value.parse::<i64>().map_err(|_| {
+            SocialError::validation("groupId", "groupId 必须是正整数或 null")
+        })?)),
+    };
+    if let Some(Some(group_id)) = group_filter
+        && group_id <= 0
+    {
+        return Err(SocialError::validation("groupId", "groupId 必须是正整数"));
+    }
 
     let name_pattern = if search_term.is_empty() {
         "%".to_string()
@@ -241,48 +272,79 @@ pub(crate) async fn list_friends(
         )
     };
 
-    let mut rows = sqlx::query(
-        "SELECT f.created_at, u.id, u.name, u.avatar_url,
+    let rows = sqlx::query(
+        "WITH friend_rows AS (
+             SELECT CASE WHEN f.user_low = $1 THEN f.user_high ELSE f.user_low END AS friend_id,
+                    f.created_at
+             FROM social_friendships f
+             WHERE f.user_low = $1 OR f.user_high = $1
+         )
+         SELECT fr.friend_id, fr.created_at, u.name, u.avatar_url,
+                m.user_id IS NOT NULL AS has_metadata,
+                COALESCE(m.note, '') AS note,
+                COALESCE(m.starred, false) AS starred,
+                m.group_id,
                 EXISTS (
                     SELECT 1 FROM social_blocks b
-                    WHERE b.user_id = $1 AND b.blocked_id = u.id
+                    WHERE b.user_id = $1 AND b.blocked_id = fr.friend_id
                 ) AS blocked_by_me,
                 (NOT EXISTS (
                     SELECT 1 FROM social_blocks b
-                    WHERE (b.user_id = $1 AND b.blocked_id = u.id)
-                       OR (b.user_id = u.id AND b.blocked_id = $1)
+                    WHERE (b.user_id = $1 AND b.blocked_id = fr.friend_id)
+                       OR (b.user_id = fr.friend_id AND b.blocked_id = $1)
                  )
-                 AND COALESCE(p.message_policy, 'everyone') <> 'nobody') AS can_message
-         FROM social_friendships f
-         JOIN users u ON u.id = CASE WHEN f.user_low = $1 THEN f.user_high ELSE f.user_low END
-         LEFT JOIN social_preferences p ON p.user_id = u.id
-         WHERE (f.user_low = $1 OR f.user_high = $1)
-           AND ($2 = '%' OR LOWER(u.name) LIKE $2 ESCAPE '\\')
-           AND ($3::timestamptz IS NULL OR (f.created_at, u.id) < ($3::timestamptz, $4::int))
-         ORDER BY f.created_at DESC, u.id DESC
-         LIMIT $5",
+                 AND COALESCE(p.message_policy, 'everyone') <> 'nobody') AS can_message,
+                COUNT(*) OVER() AS total
+         FROM friend_rows fr
+         JOIN users u ON u.id = fr.friend_id
+         LEFT JOIN social_friend_metadata m
+                ON m.user_id = $1 AND m.friend_id = fr.friend_id
+         LEFT JOIN social_preferences p ON p.user_id = fr.friend_id
+         WHERE ($2 = '%'
+                OR LOWER(u.name) LIKE $2 ESCAPE '\\'
+                OR LOWER(COALESCE(m.note, '')) LIKE $2 ESCAPE '\\')
+           AND ($3::bool IS NULL OR COALESCE(m.starred, false) = $3)
+           AND (NOT $4
+                OR CASE WHEN $5::bigint IS NULL THEN m.group_id IS NULL ELSE m.group_id = $5 END)
+           AND ($6::int[] IS NULL OR fr.friend_id = ANY($6))
+         ORDER BY fr.created_at DESC, fr.friend_id DESC
+         LIMIT $7 OFFSET $8",
     )
     .bind(viewer.id)
     .bind(&name_pattern)
-    .bind(cursor.map(|value| value.at))
-    .bind(cursor.map(|value| value.id).unwrap_or(0))
+    .bind(query.starred)
+    .bind(group_filter.is_some())
+    .bind(group_filter.flatten())
+    .bind(online_ids)
     .bind(limit + 1)
+    .bind(cursor)
     .fetch_all(&pool)
     .await
     .map_err(SocialError::internal)?;
 
     let has_more = rows.len() as i64 > limit;
+    let total: Option<i64> = rows.first().map(|row| row.get("total"));
+    let mut rows = rows;
     rows.truncate(limit as usize);
 
     let items: Vec<Friendship> = rows
         .iter()
         .map(|row| {
-            let id: i32 = row.get("id");
+            let id: i32 = row.get("friend_id");
             let created_at: DateTime<Utc> = row.get("created_at");
             let relationship = if row.get::<bool, _>("blocked_by_me") {
                 Relationship::Blocked
             } else {
                 Relationship::Friends
+            };
+            let metadata = if row.get::<bool, _>("has_metadata") {
+                Some(FriendMetadata {
+                    note: row.get("note"),
+                    starred: row.get("starred"),
+                    group_id: row.get("group_id"),
+                })
+            } else {
+                Some(FriendMetadata::default())
             };
             Friendship {
                 user: SocialUser::new(
@@ -292,17 +354,363 @@ pub(crate) async fn list_friends(
                     row.get("can_message"),
                 ),
                 created_at: created_at.to_rfc3339(),
+                metadata,
             }
         })
         .collect();
 
-    let next_cursor = has_more.then(|| {
-        let last = rows
-            .last()
-            .expect("rows is non-empty when has_more is true");
-        encode_time_cursor(last.get("created_at"), last.get("id"))
-    });
-    Ok(Json(Page::new(items, next_cursor)))
+    let mut page = Page::new(
+        items,
+        has_more.then(|| encode_offset_cursor(cursor + limit)),
+    );
+    page.total = total;
+    Ok(Json(page))
+}
+
+/// Aggregate counts for the friends sidebar. Online is a live snapshot, not a
+/// stored flag; the frontend polls it only while a WebSocket is connected.
+pub(crate) async fn summary(
+    State(pool): State<Pool<Postgres>>,
+    Extension(ws_state): Extension<ws::WsState>,
+    headers: HeaderMap,
+) -> Result<Json<SocialSummary>, SocialError> {
+    let viewer = require_viewer(&pool, &headers).await?;
+
+    let total: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM social_friendships WHERE user_low = $1 OR user_high = $1",
+    )
+    .bind(viewer.id)
+    .fetch_one(&pool)
+    .await
+    .map_err(SocialError::internal)?;
+
+    let starred: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM social_friend_metadata m
+         WHERE m.user_id = $1 AND m.starred = true
+           AND EXISTS (
+               SELECT 1 FROM social_friendships f
+               WHERE f.user_low = LEAST($1, m.friend_id)
+                 AND f.user_high = GREATEST($1, m.friend_id)
+           )",
+    )
+    .bind(viewer.id)
+    .fetch_one(&pool)
+    .await
+    .map_err(SocialError::internal)?;
+
+    let incoming: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM social_friend_requests
+         WHERE recipient_id = $1 AND status = 'pending'",
+    )
+    .bind(viewer.id)
+    .fetch_one(&pool)
+    .await
+    .map_err(SocialError::internal)?;
+
+    let friend_ids: Vec<i32> = sqlx::query_scalar(
+        "SELECT CASE WHEN user_low = $1 THEN user_high ELSE user_low END
+         FROM social_friendships WHERE user_low = $1 OR user_high = $1",
+    )
+    .bind(viewer.id)
+    .fetch_all(&pool)
+    .await
+    .map_err(SocialError::internal)?;
+    let online = friend_ids
+        .into_iter()
+        .filter(|id| ws_state.is_online(*id))
+        .count() as i64;
+
+    Ok(Json(SocialSummary {
+        total,
+        online,
+        starred,
+        incoming,
+    }))
+}
+
+pub(crate) async fn get_friend_metadata(
+    State(pool): State<Pool<Postgres>>,
+    Path(friend_id): Path<i64>,
+    headers: HeaderMap,
+) -> Result<Json<FriendMetadata>, SocialError> {
+    let viewer = require_viewer(&pool, &headers).await?;
+    let friend_id = positive_id(friend_id, "userId")?;
+    require_friendship(&pool, viewer.id, friend_id).await?;
+    Ok(Json(
+        load_friend_metadata(&pool, viewer.id, friend_id).await?,
+    ))
+}
+
+pub(crate) async fn update_friend_metadata(
+    State(pool): State<Pool<Postgres>>,
+    Extension(ws_state): Extension<ws::WsState>,
+    Path(friend_id): Path<i64>,
+    headers: HeaderMap,
+    Json(payload): Json<FriendMetadataPatch>,
+) -> Result<Json<FriendMetadata>, SocialError> {
+    let viewer = require_viewer(&pool, &headers).await?;
+    let friend_id = positive_id(friend_id, "userId")?;
+    require_friendship(&pool, viewer.id, friend_id).await?;
+
+    let note = match payload.note.as_deref() {
+        Some(value) => {
+            let note = value.trim().to_string();
+            if note.chars().count() > 60 {
+                return Err(SocialError::validation("note", "备注不能超过 60 个字符"));
+            }
+            if note.chars().any(char::is_control) {
+                return Err(SocialError::validation("note", "备注不能包含控制字符"));
+            }
+            Some(note)
+        }
+        None => None,
+    };
+
+    let current = load_friend_metadata(&pool, viewer.id, friend_id).await?;
+    let next_note = note.unwrap_or(current.note);
+    let next_starred = payload.starred.unwrap_or(current.starred);
+    let next_group = match payload.group_id {
+        None => current.group_id,
+        Some(value) => value,
+    };
+
+    if let Some(group_id) = next_group {
+        if group_id <= 0 {
+            return Err(SocialError::validation("groupId", "分组标识不合法"));
+        }
+        let owned: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM social_friend_groups WHERE id = $1 AND user_id = $2)",
+        )
+        .bind(group_id)
+        .bind(viewer.id)
+        .fetch_one(&pool)
+        .await
+        .map_err(SocialError::internal)?;
+        if !owned {
+            return Err(SocialError::validation("groupId", "分组不存在"));
+        }
+    }
+
+    sqlx::query(
+        "INSERT INTO social_friend_metadata (user_id, friend_id, note, starred, group_id)
+         VALUES ($1, $2, $3, $4, $5)
+         ON CONFLICT (user_id, friend_id) DO UPDATE
+         SET note = EXCLUDED.note,
+             starred = EXCLUDED.starred,
+             group_id = EXCLUDED.group_id,
+             updated_at = NOW()",
+    )
+    .bind(viewer.id)
+    .bind(friend_id)
+    .bind(&next_note)
+    .bind(next_starred)
+    .bind(next_group)
+    .execute(&pool)
+    .await
+    .map_err(SocialError::internal)?;
+
+    notify(
+        &ws_state,
+        viewer.id,
+        "friend_metadata_changed",
+        None,
+        Some(friend_id),
+    );
+
+    Ok(Json(FriendMetadata {
+        note: next_note,
+        starred: next_starred,
+        group_id: next_group,
+    }))
+}
+
+async fn require_friendship(
+    pool: &Pool<Postgres>,
+    viewer_id: i32,
+    friend_id: i32,
+) -> Result<(), SocialError> {
+    if friend_id == viewer_id {
+        return Err(SocialError::validation("userId", "不能对自己设置好友信息"));
+    }
+    let are_friends: bool = sqlx::query_scalar(
+        "SELECT EXISTS(
+             SELECT 1 FROM social_friendships
+             WHERE user_low = LEAST($1, $2) AND user_high = GREATEST($1, $2)
+         )",
+    )
+    .bind(viewer_id)
+    .bind(friend_id)
+    .fetch_one(pool)
+    .await
+    .map_err(SocialError::internal)?;
+    if !are_friends {
+        return Err(SocialError::forbidden("只能为好友设置备注与分组"));
+    }
+    Ok(())
+}
+
+async fn load_friend_metadata(
+    pool: &Pool<Postgres>,
+    viewer_id: i32,
+    friend_id: i32,
+) -> Result<FriendMetadata, SocialError> {
+    let row = sqlx::query(
+        "SELECT note, starred, group_id FROM social_friend_metadata
+         WHERE user_id = $1 AND friend_id = $2",
+    )
+    .bind(viewer_id)
+    .bind(friend_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(SocialError::internal)?;
+    Ok(row
+        .map(|row| FriendMetadata {
+            note: row.get("note"),
+            starred: row.get("starred"),
+            group_id: row.get("group_id"),
+        })
+        .unwrap_or_default())
+}
+
+pub(crate) async fn list_groups(
+    State(pool): State<Pool<Postgres>>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<FriendGroup>>, SocialError> {
+    let viewer = require_viewer(&pool, &headers).await?;
+    let rows = sqlx::query(
+        "SELECT id, name FROM social_friend_groups
+         WHERE user_id = $1
+         ORDER BY LOWER(name), id",
+    )
+    .bind(viewer.id)
+    .fetch_all(&pool)
+    .await
+    .map_err(SocialError::internal)?;
+    Ok(Json(
+        rows.iter()
+            .map(|row| FriendGroup {
+                id: row.get("id"),
+                name: row.get("name"),
+            })
+            .collect(),
+    ))
+}
+
+fn validate_group_name(value: Option<&str>) -> Result<String, SocialError> {
+    let name = value.unwrap_or("").trim();
+    if name.is_empty() || name.chars().count() > 30 {
+        return Err(SocialError::validation("name", "分组名称需为 1–30 个字符"));
+    }
+    if name.chars().any(char::is_control) {
+        return Err(SocialError::validation("name", "分组名称不能包含控制字符"));
+    }
+    Ok(name.to_string())
+}
+
+pub(crate) async fn create_group(
+    State(pool): State<Pool<Postgres>>,
+    Extension(ws_state): Extension<ws::WsState>,
+    headers: HeaderMap,
+    Json(payload): Json<GroupPayload>,
+) -> Result<(StatusCode, Json<FriendGroup>), SocialError> {
+    let viewer = require_viewer(&pool, &headers).await?;
+    let name = validate_group_name(payload.name.as_deref())?;
+
+    let row = sqlx::query(
+        "INSERT INTO social_friend_groups (user_id, name) VALUES ($1, $2)
+         RETURNING id, name",
+    )
+    .bind(viewer.id)
+    .bind(&name)
+    .fetch_one(&pool)
+    .await
+    .map_err(|error| match error {
+        sqlx::Error::Database(database) if database.is_unique_violation() => {
+            SocialError::conflict("分组名称已存在")
+        }
+        other => SocialError::internal(other),
+    })?;
+
+    notify(&ws_state, viewer.id, "friend_group_changed", None, None);
+    Ok((
+        StatusCode::CREATED,
+        Json(FriendGroup {
+            id: row.get("id"),
+            name: row.get("name"),
+        }),
+    ))
+}
+
+pub(crate) async fn rename_group(
+    State(pool): State<Pool<Postgres>>,
+    Extension(ws_state): Extension<ws::WsState>,
+    Path(group_id): Path<i64>,
+    headers: HeaderMap,
+    Json(payload): Json<GroupPayload>,
+) -> Result<Json<FriendGroup>, SocialError> {
+    let viewer = require_viewer(&pool, &headers).await?;
+    let group_id = validate_positive_i64(group_id, "id")?;
+    let name = validate_group_name(payload.name.as_deref())?;
+
+    let row = sqlx::query(
+        "UPDATE social_friend_groups SET name = $1, updated_at = NOW()
+         WHERE id = $2 AND user_id = $3
+         RETURNING id, name",
+    )
+    .bind(&name)
+    .bind(group_id)
+    .bind(viewer.id)
+    .fetch_optional(&pool)
+    .await
+    .map_err(|error| match error {
+        sqlx::Error::Database(database) if database.is_unique_violation() => {
+            SocialError::conflict("分组名称已存在")
+        }
+        other => SocialError::internal(other),
+    })?
+    .ok_or_else(|| SocialError::validation("id", "分组不存在"))?;
+
+    notify(&ws_state, viewer.id, "friend_group_changed", None, None);
+    Ok(Json(FriendGroup {
+        id: row.get("id"),
+        name: row.get("name"),
+    }))
+}
+
+pub(crate) async fn delete_group(
+    State(pool): State<Pool<Postgres>>,
+    Extension(ws_state): Extension<ws::WsState>,
+    Path(group_id): Path<i64>,
+    headers: HeaderMap,
+) -> Result<StatusCode, SocialError> {
+    let viewer = require_viewer(&pool, &headers).await?;
+    let group_id = validate_positive_i64(group_id, "id")?;
+
+    let mut transaction = pool.begin().await.map_err(SocialError::internal)?;
+    sqlx::query(
+        "UPDATE social_friend_metadata SET group_id = NULL, updated_at = NOW()
+         WHERE user_id = $1 AND group_id = $2",
+    )
+    .bind(viewer.id)
+    .bind(group_id)
+    .execute(&mut *transaction)
+    .await
+    .map_err(SocialError::internal)?;
+
+    let deleted = sqlx::query("DELETE FROM social_friend_groups WHERE id = $1 AND user_id = $2")
+        .bind(group_id)
+        .bind(viewer.id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(SocialError::internal)?;
+    transaction.commit().await.map_err(SocialError::internal)?;
+
+    if deleted.rows_affected() == 0 {
+        return Err(SocialError::validation("id", "分组不存在"));
+    }
+
+    notify(&ws_state, viewer.id, "friend_group_changed", None, None);
+    Ok(StatusCode::NO_CONTENT)
 }
 
 pub(crate) async fn list_requests(

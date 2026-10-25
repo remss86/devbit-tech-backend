@@ -1,5 +1,22 @@
 # 更新日志
 
+## [0.6.0] - 2026-10-25
+### 新增
+- **好友工作台完整后端**：`GET /api/v2/social/summary`、好友备注/星标/分组、`GET/PATCH /friends/{id}/metadata`、分组 CRUD，以及好友列表的 `q/status/starred/groupId` 筛选与 `total`。
+- **会话工作台**：`GET /api/v2/social/conversations`、`GET/POST /conversations/{id}/messages`、会话置顶/免打扰/归档、按消息 ID 推进已读；发送使用 `clientMessageId` 幂等，重复请求返回同一条消息。
+- **账号恢复 V2**：`POST /api/v2/account/password-reset/code` 与 `/confirm`；统一受理提示避免账号枚举，验证码单次有效、5 次失败锁定、60 秒重发冷却、密码重置后旧密码立即失效。
+- **帖子嵌套回复**：`forum_comments.parent_id` 迁移；评论接口返回 `parentId`/`replyTo`，支持最多 5 层嵌套，删除父评论级联删除回复。
+- **帖子转发**：`PUT /api/forum/posts/{id}/repost` 切换转发，`ForumPost` 新增 `repostCount`/`repostedByMe`；不复制原帖，评论和点赞保持单份。
+- **陌生人私信限制（服务端持久化）**：非好友向同一对象只能发送一条私信，直到对方回复；刷新页面、清除历史或换客户端都不能绕过。旧 `/api/forum/messages` 与新会话接口执行同一规则，返回 `MESSAGE_LIMIT_REACHED`。
+
+### 修复
+- 好友列表接收偏好过滤现在与发送端点使用同一规则。
+- `clientMessageId` 唯一约束防止网络超时重试产生重复消息。
+- 新增 `sqlx` 的 `uuid` 特性以支持消息幂等键。
+
+### 测试
+- 新增 5 个 PostgreSQL 集成测试：陌生人单条限制及回复后解锁、会话幂等/已读/偏好、备注与分组权限、嵌套评论与转发、密码重置单次有效与旧密码失效；总计 53 个测试。
+
 ## [0.5.0] - 2026-10-25
 ### 变更
 - 删除旧版单向好友模型：移除 `/api/forum/friends` 的列表、添加、删除接口；这些路径现在返回 `404`。

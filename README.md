@@ -1,6 +1,6 @@
 # DevBit Tech Backend
 
-The Rust/Axum API for DevBit Tech. It provides account registration and login, avatar uploads, forum posts and comments, direct messages, friends, health checks, and real-time WebSocket notifications.
+The Rust/Axum API for DevBit Tech. It provides account registration and login, account recovery, avatar uploads, forum posts/comments (including nested replies and reposts), direct messages (with a persisted stranger limit and idempotent sends), friends, friend metadata/groups, conversation preferences, health checks, and real-time WebSocket notifications.
 
 The detailed HTTP contract is in [api.md](./api.md). The Social V2 contract and its implementation status are documented in [SOCIAL-API-V2.md](./SOCIAL-API-V2.md).
 

@@ -11,7 +11,7 @@ mod messages;
 mod model;
 mod relationships;
 
-pub use messages::{MessagePermission, message_permission};
+pub use messages::{MessagePermission, message_permission, permission_error};
 pub use model::MessagePolicy;
 
 use crate::{
@@ -47,10 +47,23 @@ fn v2_routes() -> Router<Pool<Postgres>> {
             get(relationships::get_profile),
         )
         .route("/v2/social/feed", get(relationships::friend_feed))
+        .route("/v2/social/summary", get(relationships::summary))
         .route("/v2/social/friends", get(relationships::list_friends))
         .route(
             "/v2/social/friends/{user_id}",
             delete(relationships::remove_friend),
+        )
+        .route(
+            "/v2/social/friends/{user_id}/metadata",
+            get(relationships::get_friend_metadata).patch(relationships::update_friend_metadata),
+        )
+        .route(
+            "/v2/social/groups",
+            get(relationships::list_groups).post(relationships::create_group),
+        )
+        .route(
+            "/v2/social/groups/{id}",
+            axum::routing::patch(relationships::rename_group).delete(relationships::delete_group),
         )
         .route(
             "/v2/social/friend-requests",
@@ -78,6 +91,22 @@ fn v2_routes() -> Router<Pool<Postgres>> {
             get(relationships::get_preferences).patch(relationships::update_preferences),
         )
         .route("/v2/social/presence", get(relationships::presence))
+        .route(
+            "/v2/social/conversations",
+            get(messages::list_conversations),
+        )
+        .route(
+            "/v2/social/conversations/{partner_id}/messages",
+            get(messages::list_history).post(messages::send_message),
+        )
+        .route(
+            "/v2/social/conversations/{partner_id}/preferences",
+            axum::routing::patch(messages::update_conversation_preferences),
+        )
+        .route(
+            "/v2/social/conversations/{partner_id}/read",
+            put(messages::mark_read),
+        )
         .route(
             "/v2/social/conversations/{partner_id}/history",
             delete(messages::clear_history),
@@ -189,6 +218,20 @@ impl SocialError {
             "REQUEST_NOT_PENDING",
             "该好友申请已处理",
         )
+    }
+
+    /// The recipient has not replied yet, so a non-friend may send only one
+    /// message. Persisted server-side; refreshing the page does not reset it.
+    pub fn message_limit(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::FORBIDDEN, "MESSAGE_LIMIT_REACHED", message)
+    }
+
+    pub fn message_conflict(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::CONFLICT, "MESSAGE_CONFLICT", message)
+    }
+
+    pub fn conflict(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::CONFLICT, "CONFLICT", message)
     }
 
     pub fn internal(error: impl std::fmt::Display) -> Self {

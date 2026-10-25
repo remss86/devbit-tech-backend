@@ -122,6 +122,8 @@ impl SocialUser {
 pub struct Friendship {
     pub user: SocialUser,
     pub created_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<FriendMetadata>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -137,6 +139,60 @@ pub struct SocialProfile {
     #[serde(flatten)]
     pub user: SocialUser,
     pub recent_posts: Vec<RecentPost>,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FriendMetadata {
+    pub note: String,
+    pub starred: bool,
+    pub group_id: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FriendGroup {
+    pub id: i64,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SocialSummary {
+    pub total: i64,
+    pub online: i64,
+    pub starred: i64,
+    pub incoming: i64,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConversationPreferences {
+    pub pinned: bool,
+    pub muted: bool,
+    pub archived: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConversationSummary {
+    pub user: SocialUser,
+    pub last_message: Option<WorkspaceMessage>,
+    pub unread: i64,
+    pub preferences: ConversationPreferences,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceMessage {
+    pub id: i32,
+    pub sender: ForumUser,
+    pub recipient: ForumUser,
+    pub content: String,
+    pub created_at: String,
+    pub is_read: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_message_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -212,4 +268,50 @@ pub struct CreateFriendRequestPayload {
 pub struct PreferencesPatch {
     pub message_policy: Option<String>,
     pub friend_request_policy: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FriendMetadataPatch {
+    pub note: Option<String>,
+    pub starred: Option<bool>,
+    /// Missing means "keep", `null` means "ungroup", a number means "move to
+    /// this group". The custom decoder is required because serde otherwise
+    /// collapses both missing and null into `None`.
+    #[serde(default, deserialize_with = "deserialize_nullable_i64")]
+    pub group_id: Option<Option<i64>>,
+}
+
+fn deserialize_nullable_i64<'de, D>(deserializer: D) -> Result<Option<Option<i64>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<i64>::deserialize(deserializer).map(Some)
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct GroupPayload {
+    pub name: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConversationPreferencesPatch {
+    pub pinned: Option<bool>,
+    pub muted: Option<bool>,
+    pub archived: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SendWorkspaceMessagePayload {
+    pub recipient_id: Option<i64>,
+    pub content: Option<String>,
+    pub client_message_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReadConversationPayload {
+    pub last_read_message_id: Option<i64>,
 }

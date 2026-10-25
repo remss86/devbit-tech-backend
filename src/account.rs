@@ -26,6 +26,9 @@ const VERIFICATION_CODE_LENGTH: usize = 6;
 const MAX_NAME_CHARS: usize = 50;
 const MAX_EMAIL_CHARS: usize = 254;
 const MIN_PASSWORD_CHARS: usize = 8;
+const PASSWORD_RESET_EXPIRES_SECONDS: u32 = 600;
+const PASSWORD_RESET_RESEND_SECONDS: i64 = 60;
+const MAX_PASSWORD_RESET_ATTEMPTS: i32 = 5;
 /// Password hashing is intentionally CPU-expensive. Bound concurrent
 /// derivations so a burst of registration/login attempts cannot exhaust all
 /// blocking threads.
@@ -156,6 +159,41 @@ struct LogoutResponse {
     success: bool,
 }
 
+#[derive(Deserialize)]
+struct PasswordResetCodeRequest {
+    email: String,
+}
+
+#[derive(Deserialize)]
+struct PasswordResetConfirmRequest {
+    email: String,
+    code: String,
+    password: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PasswordResetCodeResponse {
+    message: String,
+    expires_in_seconds: u32,
+    retry_after_seconds: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    development_code: Option<String>,
+}
+
+fn account_error(status: StatusCode, code: &'static str, message: &'static str) -> Response {
+    (
+        status,
+        Json(serde_json::json!({
+            "error": {
+                "code": code,
+                "message": message,
+            }
+        })),
+    )
+        .into_response()
+}
+
 pub fn auth_routes() -> Router<Pool<Postgres>> {
     Router::new()
         .route("/register/send_code", post(send_verification_code))
@@ -164,6 +202,22 @@ pub fn auth_routes() -> Router<Pool<Postgres>> {
         .route("/api/register/send_code", post(send_verification_code))
         .route("/api/register", post(create_user))
         .route("/api/login", post(login_check))
+        .route(
+            "/v2/account/password-reset/code",
+            post(send_password_reset_code),
+        )
+        .route(
+            "/api/v2/account/password-reset/code",
+            post(send_password_reset_code),
+        )
+        .route(
+            "/v2/account/password-reset/confirm",
+            post(confirm_password_reset),
+        )
+        .route(
+            "/api/v2/account/password-reset/confirm",
+            post(confirm_password_reset),
+        )
 }
 
 pub fn account_routes() -> Router<Pool<Postgres>> {
@@ -498,6 +552,296 @@ async fn send_verification_code(
     .into_response())
 }
 
+/// Start the password-recovery flow.
+///
+/// The response is identical whether or not the mailbox exists, so this
+/// endpoint cannot be used to enumerate registered accounts. A code row is
+/// only written for a real account, and the development code is only exposed
+/// when the same explicit development switch used by registration is active.
+async fn send_password_reset_code(
+    State(pool): State<Pool<Postgres>>,
+    Json(request): Json<PasswordResetCodeRequest>,
+) -> Response {
+    let email = match normalize_email(&request.email) {
+        Ok(value) => value,
+        Err(status) => return status.into_response(),
+    };
+
+    let development_code_is_allowed = auth::should_expose_development_code();
+    let smtp_username = env::var("SMTP_USERNAME")
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+    if smtp_username.is_none() && !development_code_is_allowed {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    }
+
+    let mut transaction = match pool.begin().await {
+        Ok(value) => value,
+        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    };
+    if sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1), 1)")
+        .bind(&email)
+        .execute(&mut *transaction)
+        .await
+        .is_err()
+    {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
+
+    let last_sent: Option<DateTime<Utc>> =
+        match sqlx::query_scalar("SELECT created_at FROM password_reset_codes WHERE email = $1")
+            .bind(&email)
+            .fetch_optional(&mut *transaction)
+            .await
+        {
+            Ok(value) => value,
+            Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        };
+    if let Some(last_sent) = last_sent {
+        let elapsed = Utc::now().signed_duration_since(last_sent).num_seconds();
+        if elapsed < PASSWORD_RESET_RESEND_SECONDS {
+            transaction.rollback().await.ok();
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                [(
+                    header::RETRY_AFTER,
+                    (PASSWORD_RESET_RESEND_SECONDS - elapsed).to_string(),
+                )],
+                Json(serde_json::json!({
+                    "error": {
+                        "code": "RATE_LIMITED",
+                        "message": "操作过于频繁，请稍后再试。",
+                        "retryAfterSeconds": PASSWORD_RESET_RESEND_SECONDS - elapsed,
+                    }
+                })),
+            )
+                .into_response();
+        }
+    }
+
+    let account_exists: bool = match sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM users WHERE LOWER(email) = LOWER($1))",
+    )
+    .bind(&email)
+    .fetch_one(&mut *transaction)
+    .await
+    {
+        Ok(value) => value,
+        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    };
+
+    let code = rand::random_range(100000..=999999).to_string();
+    if account_exists
+        && sqlx::query(
+            "INSERT INTO password_reset_codes (email, code, attempts, created_at, expires_at)
+             VALUES ($1, $2, 0, NOW(), NOW() + INTERVAL '10 minutes')
+             ON CONFLICT (email) DO UPDATE
+             SET code = EXCLUDED.code,
+                 attempts = 0,
+                 created_at = NOW(),
+                 expires_at = EXCLUDED.expires_at",
+        )
+        .bind(&email)
+        .bind(&code)
+        .execute(&mut *transaction)
+        .await
+        .is_err()
+    {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
+    if transaction.commit().await.is_err() {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
+
+    let development_code = (account_exists && development_code_is_allowed).then(|| code.clone());
+
+    if account_exists && let Some(smtp_username) = smtp_username {
+        let smtp_password = match env::var("SMTP_PASSWORD") {
+            Ok(value) => value,
+            Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        };
+        let smtp_server = env::var("SMTP_SERVER").unwrap_or_else(|_| "smtp.qq.com".to_string());
+        let smtp_port = env::var("SMTP_PORT")
+            .ok()
+            .and_then(|value| value.parse::<u16>().ok())
+            .unwrap_or(465);
+        let email_message = match Message::builder()
+            .from(Mailbox::new(
+                Some("devbit".to_owned()),
+                match smtp_username.parse() {
+                    Ok(value) => value,
+                    Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+                },
+            ))
+            .to(Mailbox::new(
+                Some("client".to_owned()),
+                match email.parse() {
+                    Ok(value) => value,
+                    Err(_) => return StatusCode::BAD_REQUEST.into_response(),
+                },
+            ))
+            .subject("devbit password reset code")
+            .header(ContentType::TEXT_PLAIN)
+            .body(format!(
+                "[devbit] Password reset code: {code}. It expires in 10 minutes."
+            )) {
+            Ok(value) => value,
+            Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        };
+        let mailer = match SmtpTransport::relay(&smtp_server) {
+            Ok(value) => value
+                .port(smtp_port)
+                .credentials(Credentials::new(smtp_username, smtp_password))
+                .build(),
+            Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        };
+        if task::spawn_blocking(move || mailer.send(&email_message))
+            .await
+            .is_err()
+        {
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    }
+
+    Json(PasswordResetCodeResponse {
+        message: "如果该邮箱可以恢复，验证码将发送到该邮箱。".to_string(),
+        expires_in_seconds: PASSWORD_RESET_EXPIRES_SECONDS,
+        retry_after_seconds: PASSWORD_RESET_RESEND_SECONDS,
+        development_code,
+    })
+    .into_response()
+}
+
+/// Consume a password-reset code and replace the password.
+///
+/// The code is single-use and locks after five wrong attempts. The generic
+/// `INVALID_CODE` response covers missing accounts, missing rows and expired
+/// rows, so the endpoint does not disclose whether an account exists.
+async fn confirm_password_reset(
+    State(pool): State<Pool<Postgres>>,
+    Json(request): Json<PasswordResetConfirmRequest>,
+) -> Response {
+    let email = match normalize_email(&request.email) {
+        Ok(value) => value,
+        Err(status) => return status.into_response(),
+    };
+    let code = match validate_verification_code(&request.code) {
+        Ok(value) => value,
+        Err(_) => {
+            return account_error(
+                StatusCode::BAD_REQUEST,
+                "INVALID_CODE",
+                "验证码无效或已过期",
+            );
+        }
+    };
+    if validate_new_password(&request.password).is_err() {
+        return account_error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "VALIDATION_FAILED",
+            "密码至少 8 位，且需包含字母和数字",
+        );
+    }
+
+    let password = request.password.clone();
+    let password_hash = {
+        let _permit = match PASSWORD_HASH_LIMIT.acquire().await {
+            Ok(value) => value,
+            Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        };
+        match task::spawn_blocking(move || auth::hash_password(&password)).await {
+            Ok(value) => value,
+            Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        }
+    };
+
+    let mut transaction = match pool.begin().await {
+        Ok(value) => value,
+        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    };
+    let row = match sqlx::query(
+        "SELECT code, attempts, expires_at FROM password_reset_codes
+         WHERE email = $1
+         FOR UPDATE",
+    )
+    .bind(&email)
+    .fetch_optional(&mut *transaction)
+    .await
+    {
+        Ok(value) => value,
+        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    };
+    let Some(row) = row else {
+        return account_error(
+            StatusCode::BAD_REQUEST,
+            "INVALID_CODE",
+            "验证码无效或已过期",
+        );
+    };
+
+    let attempts: i32 = row.get("attempts");
+    let expires_at: DateTime<Utc> = row.get("expires_at");
+    if attempts >= MAX_PASSWORD_RESET_ATTEMPTS || expires_at <= Utc::now() {
+        let _ = sqlx::query("DELETE FROM password_reset_codes WHERE email = $1")
+            .bind(&email)
+            .execute(&mut *transaction)
+            .await;
+        let _ = transaction.commit().await;
+        return account_error(
+            StatusCode::BAD_REQUEST,
+            "INVALID_CODE",
+            "验证码无效或已过期",
+        );
+    }
+
+    let stored_code: String = row.get("code");
+    if stored_code != code {
+        let _ =
+            sqlx::query("UPDATE password_reset_codes SET attempts = attempts + 1 WHERE email = $1")
+                .bind(&email)
+                .execute(&mut *transaction)
+                .await;
+        let _ = transaction.commit().await;
+        return account_error(
+            StatusCode::BAD_REQUEST,
+            "INVALID_CODE",
+            "验证码无效或已过期",
+        );
+    }
+
+    let updated = match sqlx::query("UPDATE users SET password = $1 WHERE LOWER(email) = LOWER($2)")
+        .bind(&password_hash)
+        .bind(&email)
+        .execute(&mut *transaction)
+        .await
+    {
+        Ok(value) => value,
+        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    };
+    if updated.rows_affected() == 0 {
+        let _ = transaction.rollback().await;
+        return account_error(
+            StatusCode::BAD_REQUEST,
+            "INVALID_CODE",
+            "验证码无效或已过期",
+        );
+    }
+
+    if sqlx::query("DELETE FROM password_reset_codes WHERE email = $1")
+        .bind(&email)
+        .execute(&mut *transaction)
+        .await
+        .is_err()
+    {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
+    if transaction.commit().await.is_err() {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
+
+    StatusCode::NO_CONTENT.into_response()
+}
+
 async fn current_user(
     State(pool): State<Pool<Postgres>>,
     headers: HeaderMap,
@@ -713,6 +1057,90 @@ mod tests {
             }),
         )
         .await
+    }
+
+    #[tokio::test]
+    async fn password_reset_is_generic_and_single_use() {
+        let _guard = TEST_LOCK.lock().await;
+        let pool = setup().await;
+        let app = app(pool.clone());
+
+        let code = issue_code(&app, "reset@example.com").await;
+        let (status, _) = register(
+            &app,
+            "Reset User",
+            "reset@example.com",
+            &code,
+            "original-password1",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let (status, body) = post(
+            &app,
+            "/api/v2/account/password-reset/code",
+            json!({"email": "reset@example.com"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(
+            body["message"],
+            "如果该邮箱可以恢复，验证码将发送到该邮箱。"
+        );
+        let reset_code = body["developmentCode"].as_str().unwrap().to_string();
+
+        // Unknown mailboxes get the same response, without a development code.
+        let (status, unknown) = post(
+            &app,
+            "/api/v2/account/password-reset/code",
+            json!({"email": "missing@example.com"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{unknown}");
+        assert_eq!(unknown["message"], body["message"]);
+        assert!(unknown["developmentCode"].is_null());
+
+        let (status, _) = post(
+            &app,
+            "/api/v2/account/password-reset/confirm",
+            json!({"email": "reset@example.com", "code": "000000", "password": "new-password1"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        let (status, _) = post(
+            &app,
+            "/api/v2/account/password-reset/confirm",
+            json!({"email": "reset@example.com", "code": reset_code, "password": "new-password1"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        // The reset code cannot be replayed.
+        let (status, _) = post(
+            &app,
+            "/api/v2/account/password-reset/confirm",
+            json!({"email": "reset@example.com", "code": reset_code, "password": "another-password1"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        let (status, body) = post(
+            &app,
+            "/api/login",
+            json!({"email": "reset@example.com", "password": "new-password1"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["user"]["email"], "reset@example.com");
+
+        let (status, _) = post(
+            &app,
+            "/api/login",
+            json!({"email": "reset@example.com", "password": "original-password1"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]

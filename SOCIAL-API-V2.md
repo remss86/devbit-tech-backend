@@ -1,17 +1,17 @@
 # 社交与账号恢复 V2 接入契约
 
-版本：前端草案 1（后端 0.2.0 已适配核心）· 2026-10-25。核心端点已在 `/api/v2/social` 实现，逐项状态见文末适配清单；未适配能力保持关闭。现有接口仍见 [api.md](./api.md)。前端类型源位于 `shared/social.ts`，HTTP 适配位于 `app/utils/socialService.ts`。
+版本：前端草案 1（后端 0.6.0 已适配核心与工作台）· 2026-10-25。核心端点与工作台扩展已在 `/api/v2/social` 实现，逐项状态见文末适配清单；账号恢复位于 `/api/v2/account`。现有接口仍见 [api.md](./api.md)。前端类型源位于 `shared/social.ts`，HTTP 适配位于 `app/utils/socialService.ts`。
 
 ## 模式及启用顺序
 
 | 配置 | 默认值 | 含义 |
 |---|---|---|
 | `NUXT_PUBLIC_SOCIAL_MODE` | `v2` | `v2` 使用双向好友及申请；`mock` 只用于开发；`legacy` 已在后端 0.5.0 移除 |
-| `NUXT_PUBLIC_SOCIAL_BLOCKS_ENABLED` | `false` | V2 屏蔽能力 |
-| `NUXT_PUBLIC_SOCIAL_PREFERENCES_ENABLED` | `false` | V2 接收偏好 |
-| `NUXT_PUBLIC_SOCIAL_PRESENCE_ENABLED` | `false` | V2 在线快照 |
-| `NUXT_PUBLIC_SOCIAL_HISTORY_ENABLED` | `false` | V2 仅清除自己的历史可见性 |
-| `NUXT_PUBLIC_ACCOUNT_RECOVERY_MODE` | `disabled` | `disabled`、`v2` 或开发用 `mock` |
+| `NUXT_PUBLIC_SOCIAL_BLOCKS_ENABLED` | `false` | V2 屏蔽能力；0.6.0 后端已实现 |
+| `NUXT_PUBLIC_SOCIAL_PREFERENCES_ENABLED` | `false` | V2 接收偏好；0.6.0 后端已实现 |
+| `NUXT_PUBLIC_SOCIAL_PRESENCE_ENABLED` | `false` | V2 在线快照；0.6.0 后端已实现 |
+| `NUXT_PUBLIC_SOCIAL_HISTORY_ENABLED` | `false` | V2 仅清除自己的历史可见性；0.6.0 后端已实现 |
+| `NUXT_PUBLIC_ACCOUNT_RECOVERY_MODE` | `disabled` | `disabled`、`v2` 或开发用 `mock`；0.6.0 后端已实现 v2 |
 
 `v2` 要求用户搜索、好友列表、申请收发处理及解除好友整组完成；其余能力分别开启。后端 0.5.0 起 `legacy` 单向联系人接口和 `friends` 表已删除，客户端必须使用 `v2`；真实请求失败不会切换数据源，404 也不触发旧写接口或 Mock 回退。构建和运行均禁止生产 Mock。
 
@@ -46,6 +46,8 @@ Mock 按 Nuxt 应用和当前账号独立创建，刷新后重置。`/dev-previe
 | 400 | `BAD_CURSOR` | 游标失效，重新加载第一页 |
 | 401 | `UNAUTHENTICATED` | 登录已过期 |
 | 403 | `FORBIDDEN` | 关系、屏蔽或偏好禁止此操作 |
+| 403 | `MESSAGE_LIMIT_REACHED` | 非好友已发送一条且对方未回复；刷新不会重置 |
+| 409 | `MESSAGE_CONFLICT` | 同一 `clientMessageId` 被用于不同内容 |
 | 404 | `USER_NOT_FOUND` | 用户不存在，刷新状态 |
 | 409 | `RELATIONSHIP_CHANGED` | 关系已变化，保留错误并刷新列表/搜索 |
 | 409 | `REQUEST_NOT_PENDING` | 申请已被处理，刷新列表/搜索 |
@@ -71,7 +73,7 @@ Mock 按 Nuxt 应用和当前账号独立创建，刷新后重置。`/dev-previe
 
 `SocialUser.relationship`：`self | none | outgoing_pending | incoming_pending | friends | blocked`。`contact` 已在 0.5.0 随单向联系人模型一起移除，不再返回。两个 pending 状态必须附有效 `requestId`。`canMessage` 是当前用户向此人发送私信的最终权限，综合双方屏蔽及**接收方**偏好，由后端返回。
 
-`Friendship`：`{ user: SocialUser, createdAt: ISODate }`。
+`Friendship`：`{ user: SocialUser, createdAt: ISODate, metadata?: FriendMetadata }`。`FriendMetadata` 为 `{ note, starred, groupId }`，仅当前账号可见。
 
 ```json
 {
@@ -134,6 +136,14 @@ Mock 按 Nuxt 应用和当前账号独立创建，刷新后重置。`/dev-previe
 
 V2 模式也由统一服务调用这些端点；后端必须同步在实际发送端点执行双向屏蔽与接收偏好校验。`canMessage` 只控制界面，不能替代服务端鉴权。会话历史清除后，原消息列表端点必须遵循当前用户可见性边界，且新消息仍能送达。前端只有在会话打开、窗口展开、页面可见时才标记该会话已读。
 
+### 陌生人单条私信限制
+
+非好友关系下，发送方对同一接收方只能发送一条私信；接收方回复后自动解除限制，之后双方可继续交流。该规则在服务端按 `forum_messages` 实际记录判定，清除自己的历史不会让发送方重新获得额度。旧 `POST /api/forum/messages` 与 `POST /api/v2/social/conversations/{userId}/messages` 共用同一实现：
+
+- 违规返回 `403`，错误码 `MESSAGE_LIMIT_REACHED`；
+- 屏蔽与接收偏好优先于该限制；
+- 好友关系不受此限制。
+
 ## 实时事件
 
 沿用现有 `/api/ws` 连接及原有消息事件结构；新增顶层 `type`：
@@ -182,18 +192,21 @@ V2 模式也由统一服务调用这些端点；后端必须同步在实际发�
 
 | 工作项 | 当前状态 | 后端验收要点 |
 |---|---|---|
-| V2 用户搜索/好友列表 | 可联调 | 分页、关系、requestId、canMessage |
+| V2 用户搜索/好友列表 | 可联调 | 分页、关系、requestId、canMessage；好友筛选、备注、分组、`total` 已实现 |
 | 申请收发及处理 | 可联调 | 双向原子关系、幂等、并发与权限 |
 | 解除好友 | 可联调 | 双向解除、保留会话 |
 | 历史单向联系人 | 已删除 | 0.5.0 迁移 004 归档到 `friends_legacy_archive` 后删除 `friends` 表 |
 | 屏蔽 | 可联调 | 实际发送/申请均拦截、解除后查询 |
-| 接收偏好 | 可联调 | 接收方权限、持久化、错误码 |
+| 接收偏好 | 可联调 | 接收方权限、持久化、错误码；好友设置页可保存 |
 | 在线状态 | 可联调 | 真实在线来源、可见范围、断线未知 |
 | 自己的历史可见性 | 可联调 | 不影响对方、读取端点遵循边界 |
 | 社交 WebSocket 事件 | 可联调 | 鉴权、重连恢复、控制推送频率 |
-| 账号恢复与邮件 | 待适配 | 通用提示、验证码单次有效、频控与会话策略 |
+| 好友备注/星标/分组 | 可联调 | 私人备注 60 字、分组 1–30 字、单一归属、删除分组移至未分组 |
+| 会话工作台/发送幂等 | 可联调 | 会话列表、历史分页、置顶/免打扰/归档、已读、`clientMessageId` |
+| 陌生人单条限制 | 可联调 | 服务端持久化，刷新/清历史不可绕过，对方回复后解锁 |
+| 账号恢复与邮件 | 可联调 | 通用提示、验证码单次有效、5 次锁定、60 秒频控、旧密码失效 |
 
-### 后端实现说明（0.5.0）
+### 后端实现说明（0.6.0）
 
 已实现的前缀为 `/api/v2/social`（同时兼容无 `/api` 前缀）：
 
@@ -205,17 +218,29 @@ V2 模式也由统一服务调用这些端点；后端必须同步在实际发�
 - `GET /users/{userId}/profile`：返回 `SocialUser` 字段、查看者关系、`canMessage` 以及最近 5 篇帖子的 `recentPosts`；`bio`/`interests` 尚未实现并省略。
 - `GET /feed`：已确认好友的帖子动态流，返回现有 `ForumPost` 结构，游标分页。
 - `DELETE /conversations/{userId}/history`：只改变当前账号的可见性，不删除消息。
-- 私信 `POST /api/forum/messages` 在服务端执行双向屏蔽和接收方偏好校验，违规返回 403。
+- 私信 `POST /api/forum/messages` 在服务端执行双向屏蔽和接收方偏好校验，违规返回 403；非好友且对方未回复时只允许一条，返回 403 `MESSAGE_LIMIT_REACHED`。
 - 错误响应统一为 `{"error":{"code","message","fieldErrors?","retryAfterSeconds?"}}`，业务码沿用本文上表；未知用户 404 `USER_NOT_FOUND`，申请不存在 404 `REQUEST_NOT_FOUND`。
 - WebSocket 事件在 `{type, userId?, requestId?}` 信封内发送；前端应把事件当作缓存失效信号并重新读取鉴权接口。
 
-尚未适配：好友备注/分组、公开资料的 bio/interests 字段、会话工作台与发送幂等、账号恢复与邮件。它们不会因为本次后端升级而自动启用。
+0.6.0 新增：
+
+- `GET /summary` 返回 `{ total, online, starred, incoming }`；在线数为 WebSocket 实时快照。
+- `GET /friends` 支持 `q`、`status=online`、`starred=true`、`groupId=<id|null>`，返回 `metadata` 和完整集合 `total`；游标改为偏移量，前端仍按不透明字符串处理。
+- `GET/PATCH /friends/{id}/metadata`：备注最长 60 字符，`groupId` 可为 `null`；仅好友可设置，且分组必须属于当前账号。
+- `GET/POST /groups`、`PATCH/DELETE /groups/{id}`：名称 1–30 字符，同一账号内不区分大小写唯一；删除分组原子地把成员移至未分组。
+- `GET /conversations`：按置顶、最后消息时间、对方 ID 排序，包含归档项、未读数、最后消息和偏好。
+- `GET /conversations/{id}/messages`：按时间与 ID 倒序分页，遵守当前账号的历史可见性边界，返回 `clientMessageId`。
+- `POST /conversations/{id}/messages`：`clientMessageId` 为 UUID，按 `(senderId, clientMessageId)` 唯一；重复请求返回同一消息，内容不一致返回 409 `MESSAGE_CONFLICT`。
+- `PATCH /conversations/{id}/preferences`、`PUT /conversations/{id}/read`：偏好与已读均只属于当前账号；已读只推进到指定消息 ID。
+- `POST /api/v2/account/password-reset/code`、`/confirm`：通用受理提示、验证码单次有效、5 次失败锁定、60 秒重发冷却；重置成功后旧密码立即不可登录。
+
+`bio`/`interests` 仍为可选字段；后端当前不返回，前端应省略。头像、邮箱等私密信息不会出现在社交资料中。
 
 联调顺序：在测试环境使用 v2 完成核心整组 → 逐项启用扩展开关 → 两个独立账号验证关系、权限、历史与事件 → 默认生产构建与部署验收。旧版单向联系人已删除，不再提供 legacy 回退。
 
 ## 好友中心与私信工作台扩展契约
 
-以下扩展中，公开资料 `GET /users/{userId}/profile` 与好友动态 `GET /feed` 已提供只读接口；备注、分组、汇总、会话工作台等仍待适配。路径前缀 `/api/v2/social`，身份来自会话 Cookie，路径中的用户 ID 均为会话另一方 ID，不能指定数据所有者。沿用正安全整数 ID、ISO 8601 时间、camelCase、真实 HTTP 错误及不透明分页游标。所有扩展默认关闭，不会因 404/网络故障退回 Mock 或旧写接口。
+以下扩展均已在后端 0.6.0 实现；前端能力开关需显式开启。路径前缀 `/api/v2/social`，身份来自会话 Cookie，路径中的用户 ID 均为会话另一方 ID，不能指定数据所有者。沿用正安全整数 ID、ISO 8601 时间、camelCase、真实 HTTP 错误及不透明分页游标。所有扩展默认关闭，不会因 404/网络故障退回 Mock 或旧写接口。
 
 ### 能力开关
 

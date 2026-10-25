@@ -3,6 +3,7 @@ use axum::{
     Extension, Json, Router,
     extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
+    response::{IntoResponse, Response},
     routing::{delete, get, put},
 };
 use chrono::{DateTime, Utc};
@@ -55,6 +56,11 @@ pub struct ForumPost {
     pub liked_by_me: bool,
     pub is_pinned: bool,
     pub is_locked: bool,
+    /// Number of accounts that shared this post. A repost never duplicates the
+    /// original row, so comments and likes stay attached to one post.
+    pub repost_count: i64,
+    /// Whether the current viewer has already reposted this post.
+    pub reposted_by_me: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -62,6 +68,13 @@ pub struct ForumPost {
 pub struct ForumComment {
     pub id: i32,
     pub post_id: i32,
+    /// Parent comment for a nested reply, or `null` for a top-level comment.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<i32>,
+    /// Author of the parent comment, so the UI can render "回复 @name" even
+    /// when the parent is outside the currently loaded page.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reply_to: Option<ForumUser>,
     pub author: ForumUser,
     pub content: String,
     pub created_at: String,
@@ -105,6 +118,8 @@ pub struct UpdatePostRequest {
 #[serde(rename_all = "camelCase")]
 pub struct CreateCommentRequest {
     pub content: String,
+    /// When present, create the comment as a reply under this comment.
+    pub parent_id: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -289,6 +304,11 @@ pub(crate) fn row_to_post(row: &PgRow) -> ForumPost {
         liked_by_me: row.get("liked_by_me"),
         is_pinned: row.get("is_pinned"),
         is_locked: row.get("is_locked"),
+        // Older queries (for example the bootstrap query) predate reposts.
+        // Missing columns intentionally fall back to zero rather than failing
+        // the whole feed.
+        repost_count: row.try_get::<i64, _>("repost_count").unwrap_or(0),
+        reposted_by_me: row.try_get::<bool, _>("reposted_by_me").unwrap_or(false),
     }
 }
 
@@ -316,10 +336,28 @@ fn row_to_message(row: &PgRow) -> ForumMessage {
 
 fn row_to_comment(row: &PgRow) -> ForumComment {
     let author_id: i32 = row.get("author_id");
+    let reply_to = row
+        .try_get::<Option<i32>, _>("reply_author_id")
+        .ok()
+        .flatten()
+        .map(|id| {
+            forum_user(
+                id,
+                row.try_get::<Option<String>, _>("reply_author_name")
+                    .ok()
+                    .flatten()
+                    .unwrap_or_default(),
+                row.try_get::<Option<String>, _>("reply_author_avatar_url")
+                    .ok()
+                    .flatten(),
+            )
+        });
 
     ForumComment {
         id: row.get("id"),
         post_id: row.get("post_id"),
+        parent_id: row.try_get("parent_id").ok().flatten(),
+        reply_to,
         author: forum_user(
             author_id,
             row.get("author_name"),
@@ -345,9 +383,14 @@ async fn fetch_users(pool: &Pool<Postgres>) -> Result<Vec<ForumUser>, StatusCode
 ///TODO:LEFT JOIN
 async fn fetch_comments(pool: &Pool<Postgres>) -> Result<Vec<ForumComment>, StatusCode> {
     let rows = sqlx::query(
-        "SELECT c.*, u.name as author_name, u.avatar_url as author_avatar_url
+        "SELECT c.*, u.name as author_name, u.avatar_url as author_avatar_url,
+                pc.author_id as reply_author_id,
+                ru.name as reply_author_name,
+                ru.avatar_url as reply_author_avatar_url
          FROM forum_comments c
          JOIN users u ON u.id = c.author_id
+         LEFT JOIN forum_comments pc ON pc.id = c.parent_id
+         LEFT JOIN users ru ON ru.id = pc.author_id
          ORDER BY c.created_at ASC",
     )
     .fetch_all(pool)
@@ -369,7 +412,9 @@ async fn fetch_post_by_id(
                 p.is_pinned, p.is_locked, u.name as author_name, u.avatar_url as author_avatar_url,
                 (SELECT COUNT(*) FROM forum_comments WHERE post_id = p.id)::BIGINT as comment_count,
                 COUNT(l.user_id)::BIGINT as like_count,
-                COALESCE(BOOL_OR(l.user_id = $1), false) as liked_by_me
+                COALESCE(BOOL_OR(l.user_id = $1), false) as liked_by_me,
+                (SELECT COUNT(*) FROM forum_reposts r WHERE r.post_id = p.id)::BIGINT as repost_count,
+                EXISTS(SELECT 1 FROM forum_reposts r WHERE r.post_id = p.id AND r.user_id = $1) as reposted_by_me
          FROM forum_posts p
          JOIN users u ON u.id = p.author_id
          LEFT JOIN forum_post_likes l ON l.post_id = p.id
@@ -459,7 +504,9 @@ async fn fetch_posts(
                     p.is_pinned, p.is_locked, u.name as author_name, u.avatar_url as author_avatar_url,
                     (SELECT COUNT(*) FROM forum_comments WHERE post_id = p.id)::BIGINT as comment_count,
                     COUNT(l.user_id)::BIGINT as like_count,
-                    COALESCE(BOOL_OR(l.user_id = $1), false) as liked_by_me
+                    COALESCE(BOOL_OR(l.user_id = $1), false) as liked_by_me,
+                    (SELECT COUNT(*) FROM forum_reposts r WHERE r.post_id = p.id)::BIGINT as repost_count,
+                    EXISTS(SELECT 1 FROM forum_reposts r WHERE r.post_id = p.id AND r.user_id = $1) as reposted_by_me
              FROM forum_posts p
              JOIN users u ON u.id = p.author_id
              LEFT JOIN forum_post_likes l ON l.post_id = p.id
@@ -478,7 +525,9 @@ async fn fetch_posts(
                     p.is_pinned, p.is_locked, u.name as author_name, u.avatar_url as author_avatar_url,
                     (SELECT COUNT(*) FROM forum_comments WHERE post_id = p.id)::BIGINT as comment_count,
                     COUNT(l.user_id)::BIGINT as like_count,
-                    COALESCE(BOOL_OR(l.user_id = $1), false) as liked_by_me
+                    COALESCE(BOOL_OR(l.user_id = $1), false) as liked_by_me,
+                    (SELECT COUNT(*) FROM forum_reposts r WHERE r.post_id = p.id)::BIGINT as repost_count,
+                    EXISTS(SELECT 1 FROM forum_reposts r WHERE r.post_id = p.id AND r.user_id = $1) as reposted_by_me
              FROM forum_posts p
              JOIN users u ON u.id = p.author_id
              LEFT JOIN forum_post_likes l ON l.post_id = p.id
@@ -581,6 +630,8 @@ async fn create_post(
         liked_by_me: false,
         is_pinned: false,
         is_locked: false,
+        repost_count: 0,
+        reposted_by_me: false,
     }))
 }
 
@@ -596,7 +647,9 @@ async fn my_posts(
                 u.avatar_url as author_avatar_url,
                 (SELECT COUNT(*) FROM forum_comments WHERE post_id = p.id)::BIGINT as comment_count,
                 COUNT(l.user_id)::BIGINT as like_count,
-                COALESCE(BOOL_OR(l.user_id = $1), false) as liked_by_me
+                COALESCE(BOOL_OR(l.user_id = $1), false) as liked_by_me,
+                (SELECT COUNT(*) FROM forum_reposts r WHERE r.post_id = p.id)::BIGINT as repost_count,
+                EXISTS(SELECT 1 FROM forum_reposts r WHERE r.post_id = p.id AND r.user_id = $1) as reposted_by_me
          FROM forum_posts p
          JOIN users u ON u.id = p.author_id
          LEFT JOIN forum_post_likes l ON l.post_id = p.id
@@ -757,17 +810,76 @@ async fn toggle_like(
     Ok(Json(fetch_post_by_id(&pool, id, Some(user_id)).await?))
 }
 
-///TODO:分页,嵌套回复
+/// Toggle the current account's repost of a post.
+///
+/// Reposts are intentionally idempotent: pressing again removes the share.
+/// The original post row is never copied, so comments and likes stay in one
+/// place and the count can never drift from the join table.
+async fn toggle_repost(
+    State(pool): State<Pool<Postgres>>,
+    Path(id): Path<i32>,
+    headers: HeaderMap,
+) -> Result<Json<ForumPost>, StatusCode> {
+    let user_id = require_user_id(&headers)?;
+    let post_exists: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM forum_posts WHERE id = $1)")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    if !post_exists {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    let reposted: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM forum_reposts WHERE post_id = $1 AND user_id = $2)",
+    )
+    .bind(id)
+    .bind(user_id)
+    .fetch_one(&pool)
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    if reposted {
+        sqlx::query("DELETE FROM forum_reposts WHERE post_id = $1 AND user_id = $2")
+            .bind(id)
+            .bind(user_id)
+            .execute(&pool)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    } else {
+        sqlx::query(
+            "INSERT INTO forum_reposts (post_id, user_id)
+             VALUES ($1, $2)
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(id)
+        .bind(user_id)
+        .execute(&pool)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    }
+
+    Ok(Json(fetch_post_by_id(&pool, id, Some(user_id)).await?))
+}
+
+/// Comments are returned flat, oldest first, with `parentId`/`replyTo` so the
+/// client can render an arbitrarily nested tree without re-fetching parents.
 async fn list_comments(
     State(pool): State<Pool<Postgres>>,
     Path(post_id): Path<i32>,
 ) -> Result<Json<Vec<ForumComment>>, StatusCode> {
     let rows = sqlx::query(
-        "SELECT c.*, u.name as author_name, u.avatar_url as author_avatar_url
+        "SELECT c.*, u.name as author_name, u.avatar_url as author_avatar_url,
+                pc.author_id as reply_author_id,
+                ru.name as reply_author_name,
+                ru.avatar_url as reply_author_avatar_url
          FROM forum_comments c
          JOIN users u ON u.id = c.author_id
+         LEFT JOIN forum_comments pc ON pc.id = c.parent_id
+         LEFT JOIN users ru ON ru.id = pc.author_id
          WHERE c.post_id = $1
-         ORDER BY c.created_at ASC",
+         ORDER BY c.created_at ASC, c.id ASC",
     )
     .bind(post_id)
     .fetch_all(&pool)
@@ -776,6 +888,10 @@ async fn list_comments(
 
     Ok(Json(rows.iter().map(row_to_comment).collect()))
 }
+
+/// Maximum nesting depth below a top-level comment. Six levels is enough for
+/// a forum thread while keeping the rendered tree and ancestor checks cheap.
+const MAX_COMMENT_DEPTH: i64 = 5;
 
 async fn create_comment(
     State(pool): State<Pool<Postgres>>,
@@ -802,13 +918,56 @@ async fn create_comment(
         None => return Err(StatusCode::NOT_FOUND),
     }
 
+    let parent_id = match payload.parent_id {
+        None => None,
+        Some(raw) => {
+            let parent_id = i32::try_from(raw)
+                .ok()
+                .filter(|id| *id > 0)
+                .ok_or(StatusCode::BAD_REQUEST)?;
+            let parent =
+                sqlx::query("SELECT id, post_id, author_id FROM forum_comments WHERE id = $1")
+                    .bind(parent_id)
+                    .fetch_optional(&pool)
+                    .await
+                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+                    .ok_or(StatusCode::NOT_FOUND)?;
+            let parent_post_id: i32 = parent.get("post_id");
+            if parent_post_id != post_id {
+                return Err(StatusCode::BAD_REQUEST);
+            }
+
+            let depth: Option<i64> = sqlx::query_scalar(
+                "WITH RECURSIVE ancestors AS (
+                     SELECT id, parent_id, 1::BIGINT AS depth
+                     FROM forum_comments WHERE id = $1
+                     UNION ALL
+                     SELECT c.id, c.parent_id, a.depth + 1
+                     FROM forum_comments c
+                     JOIN ancestors a ON c.id = a.parent_id
+                 )
+                 SELECT MAX(depth) FROM ancestors",
+            )
+            .bind(parent_id)
+            .fetch_one(&pool)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            if depth.unwrap_or(0) > MAX_COMMENT_DEPTH {
+                return Err(StatusCode::BAD_REQUEST);
+            }
+            Some(parent_id)
+        }
+    };
+
     let row = sqlx::query(
-        "INSERT INTO forum_comments (post_id, author_id, content) VALUES ($1, $2, $3)
+        "INSERT INTO forum_comments (post_id, author_id, content, parent_id)
+         VALUES ($1, $2, $3, $4)
          RETURNING id, created_at",
     )
     .bind(post_id)
     .bind(user.id)
     .bind(&content)
+    .bind(parent_id)
     .fetch_one(&pool)
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -818,6 +977,8 @@ async fn create_comment(
     Ok(Json(ForumComment {
         id: row.get("id"),
         post_id,
+        parent_id,
+        reply_to: None,
         author: user,
         content,
         created_at: created_at.to_rfc3339(),
@@ -859,20 +1020,25 @@ async fn send_message(
     Extension(ws_state): Extension<crate::ws::WsState>,
     headers: HeaderMap,
     Json(payload): Json<SendMessageRequest>,
-) -> Result<Json<ForumMessage>, StatusCode> {
-    let sender = require_current_user(&pool, &headers).await?;
+) -> Result<Json<ForumMessage>, Response> {
+    let sender = require_current_user(&pool, &headers)
+        .await
+        .map_err(IntoResponse::into_response)?;
     if sender.id == payload.recipient_id {
-        return Err(StatusCode::BAD_REQUEST);
+        return Err(StatusCode::BAD_REQUEST.into_response());
     }
-    let content = validate_content(&payload.content, MAX_MESSAGE_CHARS)?;
-    let recipient = get_current_user(&pool, payload.recipient_id).await?;
+    let content = validate_content(&payload.content, MAX_MESSAGE_CHARS)
+        .map_err(IntoResponse::into_response)?;
+    let recipient = get_current_user(&pool, payload.recipient_id)
+        .await
+        .map_err(IntoResponse::into_response)?;
 
     match social::message_permission(&pool, sender.id, recipient.id)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())?
     {
         social::MessagePermission::Allowed => {}
-        _ => return Err(StatusCode::FORBIDDEN),
+        permission => return Err(social::permission_error(permission).into_response()),
     }
 
     let row = sqlx::query(
@@ -885,7 +1051,7 @@ async fn send_message(
     .bind(&content)
     .fetch_one(&pool)
     .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())?;
 
     let created_at: DateTime<Utc> = row.get("created_at");
 
@@ -997,7 +1163,9 @@ async fn search_posts(
                 p.is_pinned, p.is_locked, u.name as author_name, u.avatar_url as author_avatar_url,
                 (SELECT COUNT(*) FROM forum_comments WHERE post_id = p.id)::BIGINT as comment_count,
                 COUNT(l.user_id)::BIGINT as like_count,
-                COALESCE(BOOL_OR(l.user_id = $1), false) as liked_by_me
+                COALESCE(BOOL_OR(l.user_id = $1), false) as liked_by_me,
+                (SELECT COUNT(*) FROM forum_reposts r WHERE r.post_id = p.id)::BIGINT as repost_count,
+                EXISTS(SELECT 1 FROM forum_reposts r WHERE r.post_id = p.id AND r.user_id = $1) as reposted_by_me
          FROM forum_posts p
          JOIN users u ON u.id = p.author_id
          LEFT JOIN forum_post_likes l ON l.post_id = p.id
@@ -1063,6 +1231,7 @@ pub fn forum_routes() -> Router<Pool<Postgres>> {
         .route("/api/forum/posts/{id}/pin", put(toggle_pin))
         .route("/api/forum/posts/{id}/lock", put(toggle_lock))
         .route("/api/forum/posts/{id}/like", put(toggle_like))
+        .route("/api/forum/posts/{id}/repost", put(toggle_repost))
         .route(
             "/api/forum/posts/{id}/comments",
             get(list_comments).post(create_comment),
