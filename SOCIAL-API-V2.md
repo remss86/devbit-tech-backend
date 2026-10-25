@@ -6,14 +6,14 @@
 
 | 配置 | 默认值 | 含义 |
 |---|---|---|
-| `NUXT_PUBLIC_SOCIAL_MODE` | `legacy` | `legacy` 使用现有单向联系人；`v2` 使用双向好友及申请；`mock` 只用于开发 |
+| `NUXT_PUBLIC_SOCIAL_MODE` | `v2` | `v2` 使用双向好友及申请；`mock` 只用于开发；`legacy` 已在后端 0.5.0 移除 |
 | `NUXT_PUBLIC_SOCIAL_BLOCKS_ENABLED` | `false` | V2 屏蔽能力 |
 | `NUXT_PUBLIC_SOCIAL_PREFERENCES_ENABLED` | `false` | V2 接收偏好 |
 | `NUXT_PUBLIC_SOCIAL_PRESENCE_ENABLED` | `false` | V2 在线快照 |
 | `NUXT_PUBLIC_SOCIAL_HISTORY_ENABLED` | `false` | V2 仅清除自己的历史可见性 |
 | `NUXT_PUBLIC_ACCOUNT_RECOVERY_MODE` | `disabled` | `disabled`、`v2` 或开发用 `mock` |
 
-`v2` 要求用户搜索、好友列表、申请收发处理及解除好友整组完成；其余能力分别开启。`legacy` 不读取扩展能力，即便开关为 true。真实请求失败不会切换数据源；404 不触发旧写接口或 Mock 回退。构建和运行均禁止生产 Mock。
+`v2` 要求用户搜索、好友列表、申请收发处理及解除好友整组完成；其余能力分别开启。后端 0.5.0 起 `legacy` 单向联系人接口和 `friends` 表已删除，客户端必须使用 `v2`；真实请求失败不会切换数据源，404 也不触发旧写接口或 Mock 回退。构建和运行均禁止生产 Mock。
 
 Mock 按 Nuxt 应用和当前账号独立创建，刷新后重置。`/dev-preview` 只在开发且社交 Mock 模式开放，自动使用虚构预览账号；帖子是只读样例，社交及私信在内存中运行，不发送真实写请求。Mock 演示单个当前用户的视角；邮件投递、跨账号同步、权限执行及真实推送必须由后端联调确认。
 
@@ -69,7 +69,7 @@ Mock 按 Nuxt 应用和当前账号独立创建，刷新后重置。`/dev-previe
 }
 ```
 
-`SocialUser.relationship`：`self | none | contact | outgoing_pending | incoming_pending | friends | blocked`。`contact` 仅用于兼容旧单向联系人；V2 不得将历史单向联系人直接视为双方已同意的好友。两个 pending 状态必须附有效 `requestId`。`canMessage` 是当前用户向此人发送私信的最终权限，综合双方屏蔽及**接收方**偏好，由后端返回。
+`SocialUser.relationship`：`self | none | outgoing_pending | incoming_pending | friends | blocked`。`contact` 已在 0.5.0 随单向联系人模型一起移除，不再返回。两个 pending 状态必须附有效 `requestId`。`canMessage` 是当前用户向此人发送私信的最终权限，综合双方屏蔽及**接收方**偏好，由后端返回。
 
 `Friendship`：`{ user: SocialUser, createdAt: ISODate }`。
 
@@ -185,7 +185,7 @@ V2 模式也由统一服务调用这些端点；后端必须同步在实际发�
 | V2 用户搜索/好友列表 | 可联调 | 分页、关系、requestId、canMessage |
 | 申请收发及处理 | 可联调 | 双向原子关系、幂等、并发与权限 |
 | 解除好友 | 可联调 | 双向解除、保留会话 |
-| 历史单向联系人迁移 | 待适配 | 不推断双方同意，给出迁移方案 |
+| 历史单向联系人 | 已删除 | 0.5.0 迁移 004 归档到 `friends_legacy_archive` 后删除 `friends` 表 |
 | 屏蔽 | 可联调 | 实际发送/申请均拦截、解除后查询 |
 | 接收偏好 | 可联调 | 接收方权限、持久化、错误码 |
 | 在线状态 | 可联调 | 真实在线来源、可见范围、断线未知 |
@@ -193,7 +193,7 @@ V2 模式也由统一服务调用这些端点；后端必须同步在实际发�
 | 社交 WebSocket 事件 | 可联调 | 鉴权、重连恢复、控制推送频率 |
 | 账号恢复与邮件 | 待适配 | 通用提示、验证码单次有效、频控与会话策略 |
 
-### 后端实现说明（0.3.0）
+### 后端实现说明（0.5.0）
 
 已实现的前缀为 `/api/v2/social`（同时兼容无 `/api` 前缀）：
 
@@ -209,9 +209,9 @@ V2 模式也由统一服务调用这些端点；后端必须同步在实际发�
 - 错误响应统一为 `{"error":{"code","message","fieldErrors?","retryAfterSeconds?"}}`，业务码沿用本文上表；未知用户 404 `USER_NOT_FOUND`，申请不存在 404 `REQUEST_NOT_FOUND`。
 - WebSocket 事件在 `{type, userId?, requestId?}` 信封内发送；前端应把事件当作缓存失效信号并重新读取鉴权接口。
 
-尚未适配：历史单向联系人自动迁移、好友备注/分组、公开资料的 bio/interests 字段、会话工作台与发送幂等、账号恢复与邮件。它们不会因为本次后端升级而自动启用。
+尚未适配：好友备注/分组、公开资料的 bio/interests 字段、会话工作台与发送幂等、账号恢复与邮件。它们不会因为本次后端升级而自动启用。
 
-联调顺序：保持 legacy → 在测试环境完成核心整组并选择 v2 → 逐项启用扩展开关 → 两个独立账号验证关系、权限、历史与事件 → 默认生产构建与部署验收。前端本轮没有修改 Rust、数据库或执行线上部署。
+联调顺序：在测试环境使用 v2 完成核心整组 → 逐项启用扩展开关 → 两个独立账号验证关系、权限、历史与事件 → 默认生产构建与部署验收。旧版单向联系人已删除，不再提供 legacy 回退。
 
 ## 好友中心与私信工作台扩展契约
 
@@ -228,7 +228,7 @@ V2 模式也由统一服务调用这些端点；后端必须同步在实际发�
 | `CONVERSATIONS_ENABLED` | conversations | 会话列表、历史分页、发送幂等、偏好及标记已读整组完成 |
 | `RECEIPTS_ENABLED` | receipts | 对方已读状态可用且会推送变化，需同时启用 conversations |
 
-legacy 模式始终关闭上述能力；Mock 在开发环境完整启用。未开放的备注、分组、申请、在线及会话整理展示明确状态。旧私信仍调用原 `/forum/messages` 系列，不声称具备服务端幂等或对方已读能力。
+后端 0.5.0 起不再提供 legacy 模式，上述扩展只在 v2 下按开关启用；Mock 在开发环境完整启用。未开放的备注、分组、申请、在线及会话整理展示明确状态。旧私信仍调用原 `/forum/messages` 系列，不声称具备服务端幂等或对方已读能力。
 
 ### 好友、分组与公开资料
 

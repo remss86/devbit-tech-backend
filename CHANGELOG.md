@@ -1,5 +1,16 @@
 # 更新日志
 
+## [0.5.0] - 2026-10-25
+### 变更
+- 删除旧版单向好友模型：移除 `/api/forum/friends` 的列表、添加、删除接口；这些路径现在返回 `404`。
+- 新增迁移 `202610250004_remove_legacy_friends.sql`：先把旧数据归档到 `friends_legacy_archive`，再删除 `friends` 表。
+- V2 用户关系不再返回 `contact`；只保留 `self | none | outgoing_pending | incoming_pending | friends | blocked`。
+- 前后端只支持 `NUXT_PUBLIC_SOCIAL_MODE=v2` 或 `mock`；旧的 `legacy` 单向联系人模式已不可用。
+- 部署前请执行 `pg_dump -t friends` 备份；确认新版本正常后，可手动删除 `friends_legacy_archive`。
+
+### 测试
+- 新增迁移与路由删除测试；总计 48 个测试。
+
 ## [0.4.0] - 2026-10-25
 ### 安全
 - **移除硬编码管理员**：不再把用户 ID 1/2/3 视为管理员。新增 `users.is_admin`，启动时加载；新注册用户恒为 `false`。迁移不会自动提升任何人，审计后需显式 `UPDATE` 并重启。

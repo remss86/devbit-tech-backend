@@ -59,7 +59,7 @@ src/
   server.rs      router construction, health, and HTTP middleware
   account.rs     registration, login, current user, and avatars
   auth.rs        JWT, cookies, administrator mapping, and password hashing
-  forum.rs       forum, messages, and legacy friends
+  forum.rs       forum and messages
   social/        Social V2 friends, requests, blocks, preferences, feed, profiles
   ws.rs          authenticated WebSocket connections and presence
   rate_limit.rs  trusted-proxy-aware sliding-window rate limiting
@@ -71,9 +71,14 @@ migrations/      versioned PostgreSQL schema migrations
 
 `/api/v2/social` implements the core of the frontend contract: user search,
 symmetric friendships, friend requests, blocks, receive preferences, presence
-snapshots and per-user conversation-history visibility. The legacy
-`/api/forum/friends` endpoints remain available and are intentionally separate:
-legacy one-way contacts are never treated as mutually accepted V2 friends.
+snapshots and per-user conversation-history visibility.
+
+The legacy one-way contact model was removed in 0.5.0. `/api/forum/friends` now
+returns `404`, and migration `202610250004_remove_legacy_friends.sql` drops the
+`friends` table. For safety it first archives the rows into
+`friends_legacy_archive`; take a normal `pg_dump -t friends` backup before
+deploying, verify the archive, and drop it manually when no longer needed. V2 is
+the only friends model.
 
 The server computes every relationship and `canMessage` flag for the
 authenticated viewer. Blocking and receive preferences are also enforced when
